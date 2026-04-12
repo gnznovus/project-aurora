@@ -55,7 +55,7 @@ def _enqueue_job(client, payload: dict | None = None):
 def test_register_agent_contract(client):
     data = _register_agent(client)
     assert data["schema_version"] == "v1"
-    assert data["agent_id"].startswith("ag_")
+    assert data["agent_id"].startswith("AGT_")
     assert data["api_key"]
 
 

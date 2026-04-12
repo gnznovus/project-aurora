@@ -33,6 +33,7 @@ htmlcov/
 *.err.log
 .agent-cache/
 .testdata/
+backups/
 
 # Local secrets / env
 .env

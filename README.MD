@@ -104,6 +104,17 @@ sequenceDiagram
 - Superadmin operations
   - `POST /superadmin/users`
   - `GET /superadmin/audit/logs`
+  - `POST /superadmin/backups/create`
+  - `GET /superadmin/backups`
+  - `POST /superadmin/backups/{id}/validate`
+  - `POST /superadmin/backups/prune`
+  - `POST /superadmin/backups/{id}/restore?dry_run=true`
+  - `POST /superadmin/backups/{id}/restore?dry_run=false` with confirmation body
+  - `POST /superadmin/backups/{id}/offsite-sync`
+  - `GET /superadmin/backups/{id}/manifest/download`
+  - `GET /superadmin/backups/policy`
+  - `GET /superadmin/audit/logs/export`
+  - `POST /superadmin/debug/enqueue-random` (temporary test helper)
 
 ## Security Model (MVP)
 
@@ -112,6 +123,7 @@ sequenceDiagram
 - Dashboard auth: `/login` session cookie
 - RBAC roles: `operator`, `admin`, `superadmin`
 - Audit logging for important actions (auth, user creation, plugin/job operations)
+- During restore apply, Aurora enters maintenance mode and write endpoints return `503`.
 
 ## Technology Stack
 
@@ -130,7 +142,7 @@ sequenceDiagram
 - `plugins/` - plugin artifacts served by core
 - `migrations/` - Alembic migration history
 - `tests/` - unit, contract, and integration tests
-- `scripts/` - run/restart/stop helper scripts
+- `scripts/` - run/restart/stop and backup helper scripts
 
 ## Quick Start
 
@@ -164,6 +176,22 @@ Stop all services:
 .\scripts\stop_all.ps1
 ```
 
+Backup helpers:
+
+```powershell
+.\scripts\backup_now.ps1
+.\scripts\list_backups.ps1
+.\scripts\prune_backups.ps1
+.\scripts\restore_backup.ps1 -BackupId bkp_xxx
+.\scripts\sync_backup_offsite.ps1 -BackupId bkp_xxx
+```
+
+Apply restore (non-dry-run):
+
+```powershell
+.\scripts\restore_backup.ps1 -BackupId bkp_xxx -Apply
+```
+
 ### 3. Open Dashboard
 
 - `http://127.0.0.1:8000/login`
@@ -175,6 +203,17 @@ Set production credentials with environment variables:
 
 - `AURORA_SUPERADMIN_USERNAME`
 - `AURORA_SUPERADMIN_PASSWORD`
+- `AURORA_BACKUP_DIR`
+- `AURORA_BACKUP_MAX_STORAGE_GB`
+- `AURORA_BACKUP_RETENTION_DAILY`
+- `AURORA_BACKUP_RETENTION_WEEKLY`
+- `AURORA_BACKUP_RETENTION_MONTHLY`
+- `AURORA_BACKUP_OFFSITE_DIR`
+- `AURORA_BACKUP_SCHEDULER_ENABLED`
+- `AURORA_BACKUP_SCHEDULE_CREATE_MINUTES`
+- `AURORA_BACKUP_SCHEDULE_VALIDATE_MINUTES`
+- `AURORA_BACKUP_SCHEDULE_PRUNE_MINUTES`
+- `AURORA_BACKUP_SCHEDULE_RESTORE_DRILL_MINUTES`
 
 ### 4. Demo One End-to-End Job
 
@@ -226,6 +265,33 @@ set AURORA_INTEGRATION_BASE_URL=http://127.0.0.1:8000
 pytest tests/integration -q
 ```
 
+## Troubleshooting
+
+### Agent register returns 500 after pull/update
+
+Symptom in logs:
+
+- core: `ProgrammingError ... column "cpu_load_pct" of relation "agents" does not exist`
+- agent: repeated `500 Server Error ... /agents/register`
+
+Cause:
+
+- database schema behind code (new migration not applied).
+
+Fix:
+
+```powershell
+alembic upgrade head
+.\scripts\run_all.ps1 -RestartExisting
+```
+
+If needed, check migration state:
+
+```powershell
+alembic current
+alembic history --verbose
+```
+
 ## Engineering Tradeoffs
 
 - Pull model over push model
@@ -248,4 +314,3 @@ pytest tests/integration -q
 ## Project Status
 
 Aurora is in MVP-plus phase: end-to-end orchestration is live, dashboard operations are functional, and the system is being hardened for production-oriented workflows.
-

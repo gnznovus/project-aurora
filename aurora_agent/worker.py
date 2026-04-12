@@ -12,6 +12,10 @@ from aurora_agent.executor import execute_plugin
 from aurora_agent.plugin_cache import PluginCache
 
 logger = logging.getLogger("aurora-agent")
+try:
+    import psutil
+except Exception:  # noqa: BLE001
+    psutil = None
 
 
 class AgentWorker:
@@ -39,7 +43,13 @@ class AgentWorker:
     def run_once(self) -> None:
         self.ensure_registered()
         logger.debug("agent.step heartbeat")
-        self.client.heartbeat(running_jobs=0, capacity_hint=self.settings.max_concurrency)
+        cpu_load, ram_load = self._resource_metrics()
+        self.client.heartbeat(
+            running_jobs=0,
+            capacity_hint=self.settings.max_concurrency,
+            cpu_load_pct=cpu_load,
+            ram_load_pct=ram_load,
+        )
         logger.debug("agent.step request_next_job")
         response = self.client.next_job()
         lease = response.get("lease")
@@ -114,6 +124,16 @@ class AgentWorker:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("agent loop error: %s", exc)
             time.sleep(self.settings.poll_seconds)
+
+    def _resource_metrics(self) -> tuple[int | None, int | None]:
+        if psutil is None:
+            return None, None
+        try:
+            cpu_pct = int(round(psutil.cpu_percent(interval=0.0)))
+            ram_pct = int(round(psutil.virtual_memory().percent))
+            return max(0, min(100, cpu_pct)), max(0, min(100, ram_pct))
+        except Exception:  # noqa: BLE001
+            return None, None
 
 
 if __name__ == "__main__":

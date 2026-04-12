@@ -33,6 +33,14 @@ class UserRole(str, enum.Enum):
     operator = "operator"
 
 
+class BackupStatus(str, enum.Enum):
+    created = "created"
+    validated = "validated"
+    invalid = "invalid"
+    pruned = "pruned"
+    failed = "failed"
+
+
 class Agent(Base):
     __tablename__ = "agents"
 
@@ -43,6 +51,8 @@ class Agent(Base):
     max_concurrency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     active_leases: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="online", nullable=False)
+    cpu_load_pct: Mapped[int | None] = mapped_column(Integer)
+    ram_load_pct: Mapped[int | None] = mapped_column(Integer)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utc_now_naive, nullable=False)
 
@@ -155,3 +165,25 @@ class AuditLog(Base):
     ip_address: Mapped[str | None] = mapped_column(String(64))
     user_agent: Mapped[str | None] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utc_now_naive, nullable=False)
+
+
+class BackupRecord(Base):
+    __tablename__ = "backups"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[BackupStatus] = mapped_column(Enum(BackupStatus), default=BackupStatus.created, nullable=False, index=True)
+    storage_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    manifest_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    validation_message: Mapped[str | None] = mapped_column(String(512))
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utc_now_naive, nullable=False, index=True)
+
+
+class SystemFlag(Base):
+    __tablename__ = "system_flags"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utc_now_naive, nullable=False)

@@ -37,11 +37,15 @@ class AgentInfo(BaseModel):
     active_leases: int
     max_concurrency: int
     status: str
+    cpu_load_pct: int | None = None
+    ram_load_pct: int | None = None
 
 
 class HeartbeatRequest(BaseModel):
     running_jobs: int = Field(ge=0, le=512)
     capacity_hint: int = Field(ge=1, le=64)
+    cpu_load_pct: int | None = Field(default=None, ge=0, le=100)
+    ram_load_pct: int | None = Field(default=None, ge=0, le=100)
 
 
 class EnqueueJobRequest(BaseModel):

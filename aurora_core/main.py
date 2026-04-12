@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -8,18 +9,22 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from aurora_core.auth_utils import hash_password, verify_password
+from aurora_core.backup_scheduler import BackupScheduler
+from aurora_core.backup_service import BackupService
 from aurora_core.config import Settings, get_settings
 from aurora_core.dashboard_html import DASHBOARD_HTML, LOGIN_HTML
 from aurora_core.db import create_session_factory
 from aurora_core.models import (
     Agent,
     AuditLog,
+    BackupRecord,
+    BackupStatus,
     Base,
     Execution,
     ExecutionCheckpoint,
@@ -28,6 +33,7 @@ from aurora_core.models import (
     JobStatus,
     Plugin,
     PluginVersion,
+    SystemFlag,
     User,
     UserRole,
 )
@@ -41,6 +47,7 @@ from aurora_core.schemas import (
     ExecutionResult,
     ExecutionCheckpointResponse,
     ExecutionCheckpointUpsert,
+    HeartbeatRequest,
     JobLease,
     JobProgressResponse,
     NextJobResponse,
@@ -65,7 +72,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine = session_factory.kw["bind"]
         Base.metadata.create_all(bind=engine)
         _bootstrap_superadmin(app_ref)
-        yield
+        scheduler: BackupScheduler = app_ref.state.backup_scheduler
+        scheduler.start()
+        try:
+            yield
+        finally:
+            scheduler.stop()
 
     app = FastAPI(title="Aurora Core", version="0.1.0", lifespan=lifespan)
     app.state.settings = effective_settings
@@ -73,6 +85,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.queue = _build_queue(effective_settings)
     app.state.router_strategy = DefaultStaticRoutingStrategy(effective_settings.heartbeat_ttl_seconds)
     app.state.plugin_store = PluginStore(Path(effective_settings.plugins_dir))
+    app.state.backup_service = BackupService(effective_settings, app.state.session_factory)
+    app.state.backup_scheduler = BackupScheduler(effective_settings, app.state.backup_service, app.state.session_factory)
     app.state.dashboard_sessions = {}
     app.state.dashboard_session_ttl_seconds = 60 * 60 * 8
 
@@ -178,6 +192,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db: Annotated[Session, Depends(get_db)],
         _: Annotated[None, Depends(require_admin_token)],
     ) -> RegisterPluginResponse:
+        _ensure_not_maintenance_mode(request, "plugin.register")
         store: PluginStore = request.app.state.plugin_store
         try:
             digest = store.digest_file(payload.filename)
@@ -235,6 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db: Annotated[Session, Depends(get_db)],
         _: Annotated[None, Depends(require_admin_token)],
     ) -> EnqueueJobResponse:
+        _ensure_not_maintenance_mode(request, "job.enqueue")
         queue: QueueAdapter = request.app.state.queue
         plugin = db.scalar(select(Plugin).where(Plugin.name == payload.plugin_name))
         if not plugin:
@@ -250,7 +266,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not plugin_version:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="plugin version not found")
 
-        job_id = f"job_{uuid.uuid4().hex[:16]}"
+        job_id = _new_job_id()
         job = Job(
             id=job_id,
             plugin_id=plugin.id,
@@ -291,13 +307,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/agents/register", response_model=RegisterAgentResponse)
     def register_agent(payload: RegisterAgentRequest, request: Request, db: Annotated[Session, Depends(get_db)]) -> RegisterAgentResponse:
+        _ensure_not_maintenance_mode(request, "agent.register")
         settings_obj: Settings = request.app.state.settings
         if payload.bootstrap_token != settings_obj.bootstrap_token:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid bootstrap token")
 
         agent = Agent(
             id=new_agent_id(),
-            name=payload.agent_name,
+            name=_friendly_agent_name(payload.agent_name),
             api_key=new_api_key(),
             tags=payload.tags,
             max_concurrency=payload.max_concurrency,
@@ -324,13 +341,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/agents/heartbeat", response_model=AgentInfo)
     def heartbeat(
         request: Request,
+        payload: HeartbeatRequest,
         db: Annotated[Session, Depends(get_db)],
         agent: Annotated[Agent, Depends(require_agent_auth)],
     ) -> AgentInfo:
+        _ensure_not_maintenance_mode(request, "agent.heartbeat")
+        cpu_load = payload.cpu_load_pct
+        ram_load = payload.ram_load_pct
+        capacity_hint = payload.capacity_hint or agent.max_concurrency
         db.execute(
             update(Agent)
             .where(Agent.id == agent.id)
-            .values(last_heartbeat_at=utc_now_naive(), status="online")
+            .values(
+                last_heartbeat_at=utc_now_naive(),
+                status="online",
+                max_concurrency=capacity_hint,
+                cpu_load_pct=cpu_load,
+                ram_load_pct=ram_load,
+            )
         )
         db.commit()
         db.refresh(agent)
@@ -346,6 +374,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             active_leases=agent.active_leases,
             max_concurrency=agent.max_concurrency,
             status=agent.status,
+            cpu_load_pct=agent.cpu_load_pct,
+            ram_load_pct=agent.ram_load_pct,
         )
 
     @app.post("/agents/jobs/next", response_model=NextJobResponse)
@@ -354,6 +384,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db: Annotated[Session, Depends(get_db)],
         agent: Annotated[Agent, Depends(require_agent_auth)],
     ) -> NextJobResponse:
+        _ensure_not_maintenance_mode(request, "job.lease")
         settings_obj: Settings = request.app.state.settings
         strategy: DefaultStaticRoutingStrategy = request.app.state.router_strategy
         queue: QueueAdapter = request.app.state.queue
@@ -509,6 +540,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db: Annotated[Session, Depends(get_db)],
         agent: Annotated[Agent, Depends(require_agent_auth)],
     ) -> dict:
+        _ensure_not_maintenance_mode(request, "execution.result")
         execution = db.scalar(select(Execution).where(Execution.id == execution_id))
         if not execution:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="execution not found")
@@ -569,9 +601,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def upsert_checkpoint(
         execution_id: str,
         payload: ExecutionCheckpointUpsert,
+        request: Request,
         db: Annotated[Session, Depends(get_db)],
         agent: Annotated[Agent, Depends(require_agent_auth)],
     ) -> ExecutionCheckpointResponse:
+        _ensure_not_maintenance_mode(request, "execution.checkpoint")
         execution = db.scalar(select(Execution).where(Execution.id == execution_id))
         if not execution:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="execution not found")
@@ -633,18 +667,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_admin_token: Annotated[str | None, Header(alias="X-Admin-Token")] = None,
     ) -> dict:
         actor = _get_dashboard_user(request)
+        backup_service: BackupService = request.app.state.backup_service
         if actor is None:
             settings_obj: Settings = request.app.state.settings
             if x_admin_token != settings_obj.admin_token:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="dashboard auth required")
             actor = {"username": "token_admin", "role": UserRole.superadmin.value}
 
+        settings_obj: Settings = request.app.state.settings
+        now = utc_now_naive()
         total_agents = db.scalar(select(func.count(Agent.id))) or 0
         queued_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.queued)) or 0
         running_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.leased)) or 0
+        completed_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.completed)) or 0
         failed_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.failed)) or 0
 
-        agents = list(db.scalars(select(Agent).order_by(Agent.created_at.desc()).limit(30)))
+        agents_all = list(db.scalars(select(Agent).order_by(Agent.last_heartbeat_at.desc(), Agent.created_at.desc())))
+        running_by_agent = {
+            agent_id: int(count)
+            for agent_id, count in db.execute(
+                select(Execution.agent_id, func.count(Execution.id))
+                .where(Execution.status == ExecutionStatus.leased, Execution.lease_expires_at > now)
+                .group_by(Execution.agent_id)
+            )
+        }
+        deduped_agents: list[Agent] = []
+        seen_names: set[str] = set()
+        for agent in agents_all:
+            key = (agent.name or "").strip().lower()
+            if key and key in seen_names:
+                continue
+            if key:
+                seen_names.add(key)
+            deduped_agents.append(agent)
+            if len(deduped_agents) >= 30:
+                break
         jobs = list(db.scalars(select(Job).order_by(Job.created_at.desc()).limit(50)))
         executions = list(db.scalars(select(Execution).order_by(Execution.created_at.desc()).limit(50)))
 
@@ -712,22 +769,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "total_agents": total_agents,
                 "queued_jobs": queued_jobs,
                 "running_jobs": running_jobs,
+                "completed_jobs": completed_jobs,
                 "failed_jobs": failed_jobs,
             },
             "agents": [
                 {
                     "agent_id": agent.id,
                     "name": agent.name,
-                    "status": agent.status,
-                    "active_leases": agent.active_leases,
+                    "status": (
+                        "online"
+                        if agent.last_heartbeat_at
+                        and (now - agent.last_heartbeat_at).total_seconds() <= settings_obj.heartbeat_ttl_seconds
+                        else "offline"
+                    ),
+                    "active_leases": running_by_agent.get(agent.id, max(0, int(agent.active_leases or 0))),
                     "max_concurrency": agent.max_concurrency,
+                    "load_pct": min(
+                        100,
+                        max(
+                            0,
+                            int(
+                                (
+                                    running_by_agent.get(agent.id, max(0, int(agent.active_leases or 0)))
+                                    / max(1, int(agent.max_concurrency or 1))
+                                )
+                                * 100
+                            ),
+                        ),
+                    ),
+                    "cpu_load_pct": agent.cpu_load_pct,
+                    "ram_load_pct": agent.ram_load_pct,
                     "tags": agent.tags,
                 }
-                for agent in agents
+                for agent in deduped_agents
             ],
             "jobs": jobs_payload,
             "job_progression": job_progression[:8],
             "latest_logs": latest_logs[:12],
+            "backup_summary": backup_service.backup_summary(),
             "executions": [
                 {
                     "execution_id": execution.id,
@@ -744,6 +823,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/superadmin/users")
     async def superadmin_create_user(request: Request) -> dict:
         actor = _require_superadmin_session(request)
+        _ensure_not_maintenance_mode(request, "user.create")
         payload = await request.json()
         username = (payload.get("username") or "").strip()
         password = (payload.get("password") or "").strip()
@@ -776,6 +856,96 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return {"status": "created", "username": username, "role": role}
 
+    @app.post("/superadmin/debug/enqueue-random")
+    def superadmin_debug_enqueue_random(
+        request: Request,
+        db: Annotated[Session, Depends(get_db)],
+    ) -> dict:
+        actor = _require_superadmin_session(request)
+        _ensure_not_maintenance_mode(request, "debug.enqueue_random")
+        queue: QueueAdapter = request.app.state.queue
+        store: PluginStore = request.app.state.plugin_store
+
+        plugin_name = "echo"
+        plugin_version_value = "1.0.0"
+        plugin_filename = "echo_plugin.py"
+
+        plugin = db.scalar(select(Plugin).where(Plugin.name == plugin_name))
+        if not plugin:
+            plugin = Plugin(name=plugin_name)
+            db.add(plugin)
+            db.flush()
+
+        plugin_version = db.scalar(
+            select(PluginVersion).where(
+                PluginVersion.plugin_id == plugin.id,
+                PluginVersion.version == plugin_version_value,
+            )
+        )
+        if not plugin_version:
+            digest = store.digest_file(plugin_filename)
+            plugin_version = PluginVersion(
+                plugin_id=plugin.id,
+                version=plugin_version_value,
+                digest=digest,
+                filename=plugin_filename,
+                timeout_seconds=30,
+                entrypoint="python",
+            )
+            db.add(plugin_version)
+            db.flush()
+
+        mode_roll = random.random()
+        if mode_roll < 0.12:
+            payload = {"action": "fail", "code": random.choice([1, 2, 3]), "message": "debug fail sample"}
+            mode = "fail"
+        elif mode_roll < 0.82:
+            secs = random.choice([4, 5, 6, 7, 8, 10])
+            payload = {"action": "sleep", "seconds": secs, "message": f"debug sleep {secs}s"}
+            mode = "sleep"
+        else:
+            phrase = random.choice(
+                [
+                    "quick health check",
+                    "latency probe",
+                    "worker load sample",
+                    "dashboard debug event",
+                    "pipeline smoke ping",
+                ]
+            )
+            payload = {"action": "echo", "message": phrase}
+            mode = "echo"
+
+        job_id = _new_job_id()
+        job = Job(
+            id=job_id,
+            plugin_id=plugin.id,
+            plugin_version_id=plugin_version.id,
+            payload=payload,
+            required_tags=["default"],
+            max_attempts=2,
+            attempt_count=0,
+            retry_backoff_seconds=2,
+            next_retry_at=utc_now_naive(),
+            status=JobStatus.queued,
+        )
+        db.add(job)
+        db.commit()
+        queue.enqueue(job.id)
+
+        _write_audit_log(
+            request.app.state.session_factory(),
+            actor_username=actor["username"],
+            actor_role=actor["role"],
+            action="debug.job.enqueue_random",
+            resource_type="job",
+            resource_id=job.id,
+            details={"mode": mode},
+            ip_address=_request_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        return {"status": "queued", "job_id": job.id, "mode": mode}
+
     @app.get("/superadmin/audit/logs")
     def superadmin_audit_logs(request: Request, limit: int = 100) -> dict:
         _require_superadmin_session(request)
@@ -801,6 +971,220 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
         }
 
+    @app.get("/superadmin/audit/logs/export")
+    def superadmin_audit_logs_export(request: Request, limit: int = 1000) -> Response:
+        _require_superadmin_session(request)
+        safe_limit = max(1, min(limit, 5000))
+        db = request.app.state.session_factory()
+        rows = list(db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(safe_limit)))
+        db.close()
+        csv_lines = [
+            "id,at,actor_username,actor_role,action,resource_type,resource_id,ip_address,user_agent,details_json"
+        ]
+        for row in rows:
+            def _q(v):
+                raw = "" if v is None else str(v)
+                return '"' + raw.replace('"', '""') + '"'
+            csv_lines.append(
+                ",".join(
+                    [
+                        _q(row.id),
+                        _q(row.created_at.isoformat() if row.created_at else ""),
+                        _q(row.actor_username),
+                        _q(row.actor_role),
+                        _q(row.action),
+                        _q(row.resource_type),
+                        _q(row.resource_id),
+                        _q(row.ip_address),
+                        _q(row.user_agent),
+                        _q(row.details),
+                    ]
+                )
+            )
+        content = "\n".join(csv_lines) + "\n"
+        filename = f"aurora_audit_logs_{utc_now_naive().strftime('%Y%m%d_%H%M%S')}.csv"
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return Response(content=content, media_type="text/csv; charset=utf-8", headers=headers)
+
+    @app.post("/superadmin/backups/create")
+    def superadmin_backup_create(request: Request) -> dict:
+        actor = _require_superadmin_session(request)
+        service: BackupService = request.app.state.backup_service
+        result = service.create_backup(created_by=actor["username"])
+        _write_audit_log(
+            request.app.state.session_factory(),
+            actor_username=actor["username"],
+            actor_role=actor["role"],
+            action="backup.create",
+            resource_type="backup",
+            resource_id=result["backup_id"],
+            details={"size_bytes": result["size_bytes"]},
+            ip_address=_request_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        return result
+
+    @app.get("/superadmin/backups")
+    def superadmin_backup_list(request: Request, limit: int = 100) -> dict:
+        _require_superadmin_session(request)
+        service: BackupService = request.app.state.backup_service
+        return {"backups": service.list_backups(limit=limit)}
+
+    @app.post("/superadmin/backups/{backup_id}/validate")
+    def superadmin_backup_validate(request: Request, backup_id: str) -> dict:
+        actor = _require_superadmin_session(request)
+        service: BackupService = request.app.state.backup_service
+        result = service.validate_backup(backup_id)
+        if not result.get("found"):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backup not found")
+        _write_audit_log(
+            request.app.state.session_factory(),
+            actor_username=actor["username"],
+            actor_role=actor["role"],
+            action="backup.validate",
+            resource_type="backup",
+            resource_id=backup_id,
+            details={"valid": result.get("valid"), "issues": result.get("issues", [])},
+            ip_address=_request_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        return result
+
+    @app.post("/superadmin/backups/prune")
+    def superadmin_backup_prune(request: Request) -> dict:
+        actor = _require_superadmin_session(request)
+        service: BackupService = request.app.state.backup_service
+        result = service.prune_backups()
+        _write_audit_log(
+            request.app.state.session_factory(),
+            actor_username=actor["username"],
+            actor_role=actor["role"],
+            action="backup.prune",
+            resource_type="backup",
+            resource_id="policy",
+            details=result,
+            ip_address=_request_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        return result
+
+    @app.get("/superadmin/backups/policy")
+    def superadmin_backup_policy(request: Request) -> dict:
+        _require_superadmin_session(request)
+        settings_obj: Settings = request.app.state.settings
+        service: BackupService = request.app.state.backup_service
+        db = request.app.state.session_factory()
+        non_pruned = (
+            db.scalar(select(func.count()).select_from(BackupRecord).where(BackupRecord.status != BackupStatus.pruned))
+            or 0
+        )
+        db.close()
+        return {
+            "backup_dir": str(settings_obj.backup_dir),
+            "max_storage_gb": settings_obj.backup_max_storage_gb,
+            "retention": {
+                "daily": settings_obj.backup_retention_daily,
+                "weekly": settings_obj.backup_retention_weekly,
+                "monthly": settings_obj.backup_retention_monthly,
+            },
+            "scheduler": {
+                "enabled": settings_obj.backup_scheduler_enabled,
+                "create_minutes": settings_obj.backup_schedule_create_minutes,
+                "validate_minutes": settings_obj.backup_schedule_validate_minutes,
+                "prune_minutes": settings_obj.backup_schedule_prune_minutes,
+                "restore_drill_minutes": settings_obj.backup_schedule_restore_drill_minutes,
+            },
+            "offsite_dir": str(settings_obj.backup_offsite_dir) if settings_obj.backup_offsite_dir else None,
+            "non_pruned_count": int(non_pruned),
+            "maintenance_mode": service.get_maintenance_mode(),
+        }
+
+    @app.post("/superadmin/backups/{backup_id}/offsite-sync")
+    def superadmin_backup_offsite_sync(request: Request, backup_id: str) -> dict:
+        actor = _require_superadmin_session(request)
+        service: BackupService = request.app.state.backup_service
+        result = service.sync_backup_offsite(backup_id)
+        if not result.get("found"):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backup not found")
+        _write_audit_log(
+            request.app.state.session_factory(),
+            actor_username=actor["username"],
+            actor_role=actor["role"],
+            action="backup.offsite_sync",
+            resource_type="backup",
+            resource_id=backup_id,
+            details=result,
+            ip_address=_request_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        return result
+
+    @app.get("/superadmin/backups/{backup_id}/manifest/download")
+    def superadmin_backup_manifest_download(request: Request, backup_id: str) -> FileResponse:
+        _require_superadmin_session(request)
+        db = request.app.state.session_factory()
+        row = db.scalar(select(BackupRecord).where(BackupRecord.id == backup_id))
+        db.close()
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backup not found")
+        manifest_path = Path(row.storage_path) / "manifest.json"
+        if not manifest_path.exists():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="manifest file missing")
+        return FileResponse(
+            manifest_path,
+            filename=f"{backup_id}_manifest.json",
+            media_type="application/json",
+        )
+
+    @app.post("/superadmin/backups/{backup_id}/restore")
+    async def superadmin_backup_restore(request: Request, backup_id: str, dry_run: bool = True) -> dict:
+        actor = _require_superadmin_session(request)
+        service: BackupService = request.app.state.backup_service
+        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        confirm = (payload.get("confirm") or "").strip() if isinstance(payload, dict) else ""
+        if not dry_run and confirm != backup_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="confirmation required: provide JSON body {\"confirm\":\"<backup_id>\"}",
+            )
+
+        if dry_run:
+            result = service.restore_backup(backup_id=backup_id, dry_run=True)
+        else:
+            service.set_maintenance_mode(
+                enabled=True,
+                actor=actor["username"],
+                reason=f"restore backup {backup_id}",
+            )
+            try:
+                result = service.restore_backup(backup_id=backup_id, dry_run=False)
+            finally:
+                service.set_maintenance_mode(
+                    enabled=False,
+                    actor=actor["username"],
+                    reason=f"restore backup {backup_id} finished",
+                )
+        if not result.get("found"):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backup not found")
+        _write_audit_log(
+            request.app.state.session_factory(),
+            actor_username=actor["username"],
+            actor_role=actor["role"],
+            action="backup.restore.dry_run" if dry_run else "backup.restore",
+            resource_type="backup",
+            resource_id=backup_id,
+            details={
+                "dry_run": dry_run,
+                "ok": result.get("ok"),
+                "message": result.get("message"),
+            },
+            ip_address=_request_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result.get("message", "restore failed"))
+        return result
+
     return app
 
 
@@ -821,6 +1205,39 @@ def _latest_checkpoint_for_job(db: Session, job_id: str) -> dict | None:
         .order_by(ExecutionCheckpoint.created_at.desc(), ExecutionCheckpoint.id.desc())
     )
     return checkpoint.payload if checkpoint else None
+
+
+def _new_job_id() -> str:
+    ts = utc_now_naive().strftime("%Y%m%d_%H%M%S")
+    suffix = secrets.token_hex(2).upper()
+    return f"JOB_{ts}_{suffix}"
+
+
+def _friendly_agent_name(raw_name: str) -> str:
+    value = (raw_name or "").strip()
+    if value and not value.lower().startswith("agent-local"):
+        return value
+    adjectives = (
+        "North",
+        "South",
+        "East",
+        "West",
+        "Swift",
+        "Bright",
+        "Calm",
+        "Solid",
+    )
+    nouns = (
+        "Falcon",
+        "Otter",
+        "Raven",
+        "Panda",
+        "Lynx",
+        "Cedar",
+        "Comet",
+        "Harbor",
+    )
+    return f"{secrets.choice(adjectives)} {secrets.choice(nouns)} {secrets.randbelow(90) + 10}"
 
 
 def _recover_stale_leases(db: Session, queue: QueueAdapter) -> None:
@@ -891,6 +1308,35 @@ def _require_superadmin_session(request: Request) -> dict:
     if actor.get("role") != UserRole.superadmin.value:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="superadmin required")
     return actor
+
+
+def _is_maintenance_mode(request: Request) -> dict:
+    db = request.app.state.session_factory()
+    try:
+        row = db.scalar(select(SystemFlag).where(SystemFlag.key == "maintenance_mode"))
+    finally:
+        db.close()
+    if not row:
+        return {"enabled": False}
+    payload = row.value_json or {}
+    payload.setdefault("enabled", False)
+    return payload
+
+
+def _ensure_not_maintenance_mode(request: Request, action: str) -> None:
+    maintenance = _is_maintenance_mode(request)
+    if not maintenance.get("enabled"):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "message": "maintenance mode active",
+            "action": action,
+            "updated_by": maintenance.get("updated_by"),
+            "reason": maintenance.get("reason"),
+            "updated_at": maintenance.get("updated_at"),
+        },
+    )
 
 
 def _request_ip(request: Request) -> str | None:

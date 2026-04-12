@@ -15,7 +15,11 @@ from aurora_core.main import create_app
 def test_settings() -> Settings:
     root = Path("d:/Code/Python/Project_Aurora/.testdata") / uuid.uuid4().hex
     plugins_dir = root / "plugins"
+    backup_dir = root / "backups"
+    offsite_dir = root / "offsite_backups"
     plugins_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    offsite_dir.mkdir(parents=True, exist_ok=True)
     db_path = root / "aurora.db"
     sample_plugin = Path("d:/Code/Python/Project_Aurora/plugins/echo_plugin.py")
     (plugins_dir / "echo_plugin.py").write_text(sample_plugin.read_text(encoding="utf-8"), encoding="utf-8")
@@ -26,6 +30,9 @@ def test_settings() -> Settings:
         bootstrap_token="test-bootstrap",
         admin_token="test-admin",
         plugins_dir=plugins_dir,
+        backup_dir=backup_dir,
+        backup_offsite_dir=offsite_dir,
+        backup_scheduler_enabled=False,
         lease_ttl_seconds=2,
         heartbeat_ttl_seconds=60,
         agent_poll_seconds=1,

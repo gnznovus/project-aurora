@@ -13,7 +13,7 @@ from aurora_core.models import Agent
 
 
 def new_agent_id() -> str:
-    return f"ag_{uuid.uuid4().hex[:16]}"
+    return f"AGT_{uuid.uuid4().hex[:10].upper()}"
 
 
 def new_api_key() -> str:
@@ -50,4 +50,3 @@ def require_agent_auth(
     if not agent or agent.api_key != x_agent_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid agent credentials")
     return agent
-

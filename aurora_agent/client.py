@@ -43,11 +43,22 @@ class AuroraClient:
         self.credentials = credentials
         return credentials
 
-    def heartbeat(self, running_jobs: int = 0, capacity_hint: int = 1) -> dict[str, Any]:
+    def heartbeat(
+        self,
+        running_jobs: int = 0,
+        capacity_hint: int = 1,
+        cpu_load_pct: int | None = None,
+        ram_load_pct: int | None = None,
+    ) -> dict[str, Any]:
         response = requests.post(
             f"{self.base_url}/agents/heartbeat",
             headers=self._auth_headers(),
-            json={"running_jobs": running_jobs, "capacity_hint": capacity_hint},
+            json={
+                "running_jobs": running_jobs,
+                "capacity_hint": capacity_hint,
+                "cpu_load_pct": cpu_load_pct,
+                "ram_load_pct": ram_load_pct,
+            },
             timeout=self.timeout,
         )
         response.raise_for_status()
