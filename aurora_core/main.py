@@ -10,15 +10,14 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from aurora_core.auth_utils import hash_password, verify_password
+from aurora_core.auth_utils import hash_password
 from aurora_core.backup_scheduler import BackupScheduler
 from aurora_core.backup_service import BackupService
 from aurora_core.config import Settings, get_settings
-from aurora_core.dashboard_html import DASHBOARD_HTML, LOGIN_HTML
 from aurora_core.db import create_session_factory
 from aurora_core.models import (
     Agent,
@@ -38,6 +37,7 @@ from aurora_core.models import (
 )
 from aurora_core.plugin_store import PluginStore
 from aurora_core.queue import InMemoryQueue, QueueAdapter, RedisQueue
+from aurora_core.routes.auth import router as auth_router
 from aurora_core.routing import DefaultStaticRoutingStrategy
 from aurora_core.schemas import (
     AgentInfo,
@@ -59,6 +59,13 @@ from aurora_core.schemas import (
 from aurora_core.security import get_db, new_agent_id, new_api_key, require_admin_token, require_agent_auth
 from aurora_core.schema_guard import ensure_schema_ready
 from aurora_core.timeutils import utc_now_naive
+from aurora_core.web_auth import (
+    audit_important_action,
+    get_dashboard_user,
+    request_ip,
+    require_superadmin_session,
+    write_audit_log,
+)
 
 logger = logging.getLogger("aurora-core")
 
@@ -91,97 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok", "service": "aurora-core"}
-
-    @app.get("/dashboard", response_class=HTMLResponse)
-    def dashboard() -> HTMLResponse:
-        return HTMLResponse(content=DASHBOARD_HTML)
-
-    @app.get("/login", response_class=HTMLResponse)
-    def login_page() -> HTMLResponse:
-        return HTMLResponse(content=LOGIN_HTML)
-
-    @app.get("/dashboard/login")
-    def dashboard_login_redirect() -> RedirectResponse:
-        return RedirectResponse(url="/login", status_code=307)
-
-    @app.post("/login")
-    async def login_submit(request: Request) -> JSONResponse:
-        payload = await request.json()
-        username = (payload.get("username") or "").strip()
-        password = (payload.get("password") or "").strip()
-        db = request.app.state.session_factory()
-        try:
-            user = db.scalar(select(User).where(User.username == username, User.is_active.is_(True)))
-            if not user or not verify_password(password, user.password_hash):
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
-            user.last_login_at = utc_now_naive()
-            db.commit()
-            actor_username = user.username
-            actor_role = user.role
-        finally:
-            db.close()
-        session_id = secrets.token_urlsafe(32)
-        expires_at = utc_now_naive() + timedelta(seconds=request.app.state.dashboard_session_ttl_seconds)
-        request.app.state.dashboard_sessions[session_id] = {
-            "expires_at": expires_at,
-            "username": actor_username,
-            "role": actor_role,
-        }
-        _write_audit_log(
-            request.app.state.session_factory(),
-            actor_username=actor_username,
-            actor_role=actor_role,
-            action="auth.login",
-            resource_type="session",
-            resource_id=session_id[:12],
-            details={"message": "dashboard login success"},
-            ip_address=_request_ip(request),
-            user_agent=request.headers.get("user-agent"),
-        )
-        response = JSONResponse({"status": "ok", "redirect_to": "/dashboard"})
-        response.set_cookie(
-            key="aurora_dashboard_session",
-            value=session_id,
-            httponly=True,
-            samesite="lax",
-            secure=False,
-            path="/",
-        )
-        return response
-
-    @app.post("/dashboard/logout")
-    def dashboard_logout(request: Request) -> JSONResponse:
-        session_id = request.cookies.get("aurora_dashboard_session")
-        actor = _get_dashboard_user(request)
-        if session_id:
-            request.app.state.dashboard_sessions.pop(session_id, None)
-        if actor:
-            _write_audit_log(
-                request.app.state.session_factory(),
-                actor_username=actor["username"],
-                actor_role=actor["role"],
-                action="auth.logout",
-                resource_type="session",
-                resource_id=(session_id or "")[:12],
-                details={},
-                ip_address=_request_ip(request),
-                user_agent=request.headers.get("user-agent"),
-            )
-        response = JSONResponse({"status": "ok"})
-        response.delete_cookie("aurora_dashboard_session", path="/")
-        return response
-
-    @app.get("/dashboard/auth/status")
-    def dashboard_auth_status(request: Request) -> dict:
-        actor = _get_dashboard_user(request)
-        if not actor:
-            return {"authenticated": False}
-        return {
-            "authenticated": True,
-            "username": actor["username"],
-            "role": actor["role"],
-            "is_superadmin": actor["role"] == UserRole.superadmin.value,
-        }
+    app.include_router(auth_router)
 
     @app.post("/plugins/register", response_model=RegisterPluginResponse)
     def register_plugin(
@@ -231,7 +148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.add(plugin_version)
         db.commit()
         logger.info("plugin.registered name=%s version=%s digest=%s", payload.name, payload.version, digest)
-        _audit_important_action(
+        audit_important_action(
             request=request,
             db_factory=request.app.state.session_factory,
             action="plugin.register",
@@ -289,7 +206,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             job.max_attempts,
             job.retry_backoff_seconds,
         )
-        _audit_important_action(
+        audit_important_action(
             request=request,
             db_factory=request.app.state.session_factory,
             action="job.enqueue",
@@ -664,7 +581,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db: Annotated[Session, Depends(get_db)],
         x_admin_token: Annotated[str | None, Header(alias="X-Admin-Token")] = None,
     ) -> dict:
-        actor = _get_dashboard_user(request)
+        actor = get_dashboard_user(request)
         backup_service: BackupService = request.app.state.backup_service
         if actor is None:
             settings_obj: Settings = request.app.state.settings
@@ -820,7 +737,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/superadmin/users")
     async def superadmin_create_user(request: Request) -> dict:
-        actor = _require_superadmin_session(request)
+        actor = require_superadmin_session(request)
         _ensure_not_maintenance_mode(request, "user.create")
         payload = await request.json()
         username = (payload.get("username") or "").strip()
@@ -841,7 +758,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.commit()
         db.close()
 
-        _write_audit_log(
+        write_audit_log(
             request.app.state.session_factory(),
             actor_username=actor["username"],
             actor_role=actor["role"],
@@ -849,7 +766,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resource_type="user",
             resource_id=username,
             details={"role": role},
-            ip_address=_request_ip(request),
+            ip_address=request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         return {"status": "created", "username": username, "role": role}
@@ -859,7 +776,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         db: Annotated[Session, Depends(get_db)],
     ) -> dict:
-        actor = _require_superadmin_session(request)
+        actor = require_superadmin_session(request)
         _ensure_not_maintenance_mode(request, "debug.enqueue_random")
         queue: QueueAdapter = request.app.state.queue
         store: PluginStore = request.app.state.plugin_store
@@ -931,7 +848,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.commit()
         queue.enqueue(job.id)
 
-        _write_audit_log(
+        write_audit_log(
             request.app.state.session_factory(),
             actor_username=actor["username"],
             actor_role=actor["role"],
@@ -939,14 +856,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resource_type="job",
             resource_id=job.id,
             details={"mode": mode},
-            ip_address=_request_ip(request),
+            ip_address=request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         return {"status": "queued", "job_id": job.id, "mode": mode}
 
     @app.get("/superadmin/audit/logs")
     def superadmin_audit_logs(request: Request, limit: int = 100) -> dict:
-        _require_superadmin_session(request)
+        require_superadmin_session(request)
         safe_limit = max(1, min(limit, 200))
         db = request.app.state.session_factory()
         rows = list(db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(safe_limit)))
@@ -971,7 +888,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/superadmin/audit/logs/export")
     def superadmin_audit_logs_export(request: Request, limit: int = 1000) -> Response:
-        _require_superadmin_session(request)
+        require_superadmin_session(request)
         safe_limit = max(1, min(limit, 5000))
         db = request.app.state.session_factory()
         rows = list(db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(safe_limit)))
@@ -1006,11 +923,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/superadmin/backups/create")
     def superadmin_backup_create(request: Request) -> dict:
-        actor = _require_superadmin_session(request)
+        actor = require_superadmin_session(request)
         service: BackupService = request.app.state.backup_service
         result = service.create_backup(created_by=actor["username"])
         validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
-        _write_audit_log(
+        write_audit_log(
             request.app.state.session_factory(),
             actor_username=actor["username"],
             actor_role=actor["role"],
@@ -1023,25 +940,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "valid": bool(validation.get("valid")) if validation else None,
                 "offsite_synced": bool((result.get("offsite") or {}).get("synced")),
             },
-            ip_address=_request_ip(request),
+            ip_address=request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         return result
 
     @app.get("/superadmin/backups")
     def superadmin_backup_list(request: Request, limit: int = 100) -> dict:
-        _require_superadmin_session(request)
+        require_superadmin_session(request)
         service: BackupService = request.app.state.backup_service
         return {"backups": service.list_backups(limit=limit)}
 
     @app.post("/superadmin/backups/{backup_id}/validate")
     def superadmin_backup_validate(request: Request, backup_id: str) -> dict:
-        actor = _require_superadmin_session(request)
+        actor = require_superadmin_session(request)
         service: BackupService = request.app.state.backup_service
         result = service.validate_backup(backup_id)
         if not result.get("found"):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backup not found")
-        _write_audit_log(
+        write_audit_log(
             request.app.state.session_factory(),
             actor_username=actor["username"],
             actor_role=actor["role"],
@@ -1049,17 +966,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resource_type="backup",
             resource_id=backup_id,
             details={"valid": result.get("valid"), "issues": result.get("issues", [])},
-            ip_address=_request_ip(request),
+            ip_address=request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         return result
 
     @app.post("/superadmin/backups/prune")
     def superadmin_backup_prune(request: Request) -> dict:
-        actor = _require_superadmin_session(request)
+        actor = require_superadmin_session(request)
         service: BackupService = request.app.state.backup_service
         result = service.prune_backups()
-        _write_audit_log(
+        write_audit_log(
             request.app.state.session_factory(),
             actor_username=actor["username"],
             actor_role=actor["role"],
@@ -1067,14 +984,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resource_type="backup",
             resource_id="policy",
             details=result,
-            ip_address=_request_ip(request),
+            ip_address=request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         return result
 
     @app.get("/superadmin/backups/policy")
     def superadmin_backup_policy(request: Request) -> dict:
-        _require_superadmin_session(request)
+        require_superadmin_session(request)
         settings_obj: Settings = request.app.state.settings
         service: BackupService = request.app.state.backup_service
         db = request.app.state.session_factory()
@@ -1109,18 +1026,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/superadmin/backups/health")
     def superadmin_backup_health(request: Request) -> dict:
-        _require_superadmin_session(request)
+        require_superadmin_session(request)
         service: BackupService = request.app.state.backup_service
         return {"health": service.backup_summary()}
 
     @app.post("/superadmin/backups/{backup_id}/offsite-sync")
     def superadmin_backup_offsite_sync(request: Request, backup_id: str) -> dict:
-        actor = _require_superadmin_session(request)
+        actor = require_superadmin_session(request)
         service: BackupService = request.app.state.backup_service
         result = service.sync_backup_offsite(backup_id)
         if not result.get("found"):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backup not found")
-        _write_audit_log(
+        write_audit_log(
             request.app.state.session_factory(),
             actor_username=actor["username"],
             actor_role=actor["role"],
@@ -1128,14 +1045,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resource_type="backup",
             resource_id=backup_id,
             details=result,
-            ip_address=_request_ip(request),
+            ip_address=request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         return result
 
     @app.get("/superadmin/backups/{backup_id}/manifest/download")
     def superadmin_backup_manifest_download(request: Request, backup_id: str) -> FileResponse:
-        _require_superadmin_session(request)
+        require_superadmin_session(request)
         db = request.app.state.session_factory()
         row = db.scalar(select(BackupRecord).where(BackupRecord.id == backup_id))
         db.close()
@@ -1152,7 +1069,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/superadmin/backups/{backup_id}/restore")
     async def superadmin_backup_restore(request: Request, backup_id: str, dry_run: bool = True) -> dict:
-        actor = _require_superadmin_session(request)
+        actor = require_superadmin_session(request)
         service: BackupService = request.app.state.backup_service
         payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         confirm = (payload.get("confirm") or "").strip() if isinstance(payload, dict) else ""
@@ -1180,7 +1097,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
         if not result.get("found"):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backup not found")
-        _write_audit_log(
+        write_audit_log(
             request.app.state.session_factory(),
             actor_username=actor["username"],
             actor_role=actor["role"],
@@ -1192,7 +1109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "ok": result.get("ok"),
                 "message": result.get("message"),
             },
-            ip_address=_request_ip(request),
+            ip_address=request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         if not result.get("ok"):
@@ -1295,35 +1212,6 @@ def _recover_stale_leases(db: Session, queue: QueueAdapter) -> None:
     db.commit()
 
 
-def _is_dashboard_session_valid(request: Request) -> bool:
-    return _get_dashboard_user(request) is not None
-
-
-def _get_dashboard_user(request: Request) -> dict | None:
-    session_id = request.cookies.get("aurora_dashboard_session")
-    if not session_id:
-        return None
-    sessions = request.app.state.dashboard_sessions
-    session = sessions.get(session_id)
-    if not session:
-        return None
-    expiry = session.get("expires_at")
-    now = utc_now_naive()
-    if not expiry or expiry < now:
-        sessions.pop(session_id, None)
-        return None
-    return {"username": session.get("username"), "role": session.get("role")}
-
-
-def _require_superadmin_session(request: Request) -> dict:
-    actor = _get_dashboard_user(request)
-    if not actor:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
-    if actor.get("role") != UserRole.superadmin.value:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="superadmin required")
-    return actor
-
-
 def _is_maintenance_mode(request: Request) -> dict:
     db = request.app.state.session_factory()
     try:
@@ -1353,71 +1241,6 @@ def _ensure_not_maintenance_mode(request: Request, action: str) -> None:
     )
 
 
-def _request_ip(request: Request) -> str | None:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return None
-
-
-def _write_audit_log(
-    db: Session,
-    actor_username: str | None,
-    actor_role: str | None,
-    action: str,
-    resource_type: str | None,
-    resource_id: str | None,
-    details: dict,
-    ip_address: str | None,
-    user_agent: str | None,
-) -> None:
-    try:
-        row = AuditLog(
-            actor_username=actor_username,
-            actor_role=actor_role,
-            action=action,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            details=details or {},
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        db.add(row)
-        db.commit()
-    finally:
-        db.close()
-
-
-def _audit_important_action(
-    request: Request,
-    db_factory,
-    action: str,
-    resource_type: str | None,
-    resource_id: str | None,
-    details: dict,
-) -> None:
-    actor = _get_dashboard_user(request)
-    if actor:
-        actor_username = actor["username"]
-        actor_role = actor["role"]
-    else:
-        actor_username = "token_admin"
-        actor_role = UserRole.superadmin.value
-    _write_audit_log(
-        db_factory(),
-        actor_username=actor_username,
-        actor_role=actor_role,
-        action=action,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        details=details,
-        ip_address=_request_ip(request),
-        user_agent=request.headers.get("user-agent"),
-    )
-
-
 def _bootstrap_superadmin(app_ref: FastAPI) -> None:
     settings_obj: Settings = app_ref.state.settings
     db = app_ref.state.session_factory()
@@ -1439,3 +1262,4 @@ def _bootstrap_superadmin(app_ref: FastAPI) -> None:
         )
     finally:
         db.close()
+
