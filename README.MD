@@ -144,8 +144,8 @@ sequenceDiagram
 - `migrations/` - Alembic migration history
 - `tests/` - unit, contract, and integration tests
 - `scripts/` - run/restart/stop and backup helper scripts
-- `docs/TOKEN_EFFICIENT_WORKFLOW_RULES.md` - default low-token collaboration rules
-- `docs/LARGE_FILE_SLICING_PLAYBOOK.md` - safe modularization plan for large files
+- `docs/workflow.agent.MD` - default low-token collaboration rules
+- `docs/slicing.agent.MD` - safe modularization plan for large files
 
 ## Quick Start
 
