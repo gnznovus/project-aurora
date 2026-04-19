@@ -113,6 +113,7 @@ sequenceDiagram
   - `POST /superadmin/backups/{id}/offsite-sync`
   - `GET /superadmin/backups/{id}/manifest/download`
   - `GET /superadmin/backups/policy`
+  - `GET /superadmin/backups/health`
   - `GET /superadmin/audit/logs/export`
   - `POST /superadmin/debug/enqueue-random` (temporary test helper)
 
@@ -143,6 +144,8 @@ sequenceDiagram
 - `migrations/` - Alembic migration history
 - `tests/` - unit, contract, and integration tests
 - `scripts/` - run/restart/stop and backup helper scripts
+- `docs/TOKEN_EFFICIENT_WORKFLOW_RULES.md` - default low-token collaboration rules
+- `docs/LARGE_FILE_SLICING_PLAYBOOK.md` - safe modularization plan for large files
 
 ## Quick Start
 
@@ -154,14 +157,22 @@ pip install -e .[dev]
 
 ### 2. Start Everything (Windows PowerShell)
 
+Default startup (recommended): starts Docker, applies migrations, then starts Core + Agent.
+
 ```powershell
 .\scripts\run_all.ps1
 ```
 
-Restart both Core and Agent:
+Force restart both:
 
 ```powershell
 .\scripts\run_all.ps1 -RestartExisting
+```
+
+Skip migration one time (only if you are sure schema is already correct):
+
+```powershell
+.\scripts\run_all.ps1 -SkipMigrate
 ```
 
 Restart only Core:
@@ -214,6 +225,9 @@ Set production credentials with environment variables:
 - `AURORA_BACKUP_SCHEDULE_VALIDATE_MINUTES`
 - `AURORA_BACKUP_SCHEDULE_PRUNE_MINUTES`
 - `AURORA_BACKUP_SCHEDULE_RESTORE_DRILL_MINUTES`
+- `AURORA_BACKUP_VALIDATE_AFTER_CREATE`
+- `AURORA_BACKUP_PRUNE_MIN_KEEP_COUNT`
+- `AURORA_SCHEMA_AUTO_REPAIR_ON_STARTUP` (default `true`)
 
 ### 4. Demo One End-to-End Job
 
@@ -267,6 +281,13 @@ pytest tests/integration -q
 
 ## Troubleshooting
 
+### Safe Deploy Checklist
+
+```powershell
+pip install -e .[dev]
+.\scripts\run_all.ps1 -RestartExisting
+```
+
 ### Agent register returns 500 after pull/update
 
 Symptom in logs:
@@ -291,6 +312,27 @@ If needed, check migration state:
 alembic current
 alembic history --verbose
 ```
+
+### Startup fails due to migration drift
+
+Aurora now checks DB revision at startup. If schema is behind, it will try to auto-repair:
+
+- migrate to head when `alembic_version` exists but is behind
+- infer/stamp revision when legacy tables exist without `alembic_version`, then migrate
+
+If recovery still fails:
+
+```powershell
+alembic current
+alembic history --verbose
+.\scripts\migrate_and_restart.ps1
+```
+
+### Backup reliability defaults
+
+- Backup create now validates checksum immediately by default.
+- Offsite copy runs only after a valid backup.
+- Prune keeps a minimum recovery floor and avoids pruning the last validated backup.
 
 ## Engineering Tradeoffs
 

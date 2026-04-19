@@ -484,6 +484,10 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="sa-pill">Size: <span id="backup-size">0 MB</span></div>
           <div class="sa-pill">Max: <span id="backup-max-size">0 MB</span></div>
           <div class="sa-pill">Maintenance: <span id="backup-maintenance">off</span></div>
+          <div class="sa-pill">Storage use: <span id="backup-utilization">0%</span></div>
+          <div class="sa-pill">Backup health: <span id="backup-health">unknown</span></div>
+          <div class="sa-pill">Last healthy: <span id="backup-last-good">-</span></div>
+          <div class="sa-pill">Last issue: <span id="backup-last-issue">none</span></div>
         </div>
         <div class="sa-actions">
           <button id="backup-create">Create backup</button>
@@ -782,6 +786,14 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("backup-size").textContent = bytesToText(summary?.total_size_bytes);
       document.getElementById("backup-max-size").textContent = bytesToText(summary?.max_storage_bytes);
       document.getElementById("backup-maintenance").textContent = policy?.maintenance_mode?.enabled ? "on" : "off";
+      document.getElementById("backup-utilization").textContent = `${toNum(summary?.storage_utilization_pct)}%`;
+      const latestValidated = summary?.latest_validated?.backup_id || "-";
+      const latestIssue = summary?.latest_issue?.backup_id || "none";
+      const lastFailure = summary?.last_failure_event?.action || "";
+      const health = latestValidated === "-" ? "warning" : (lastFailure ? "attention" : "good");
+      document.getElementById("backup-health").textContent = health;
+      document.getElementById("backup-last-good").textContent = latestValidated;
+      document.getElementById("backup-last-issue").textContent = latestIssue;
     }
 
     async function runBackupAction(action, method = "POST", body = null, button = null, taskLabel = "Task") {
@@ -804,20 +816,25 @@ DASHBOARD_HTML = """<!doctype html>
         return null;
       }
       const data = await res.json();
-      setMsg("backup-msg", "ok", `${taskLabel}: success`);
+      const shortResult = data?.message
+        ? String(data.message)
+        : (data?.valid === true ? "success" : (data?.valid === false ? "failed" : "success"));
+      setMsg("backup-msg", "ok", `${taskLabel}: ${shortResult}`);
       setButtonState(button, "ok");
       return data;
     }
 
     async function loadBackupPanel(summaryOverride = null) {
-      const [backupsRes, policyRes] = await Promise.all([
+      const [backupsRes, policyRes, healthRes] = await Promise.all([
         fetch("/superadmin/backups?limit=30", { credentials: "include" }),
         fetch("/superadmin/backups/policy", { credentials: "include" }),
+        fetch("/superadmin/backups/health", { credentials: "include" }),
       ]);
-      if (!backupsRes.ok || !policyRes.ok) return;
+      if (!backupsRes.ok || !policyRes.ok || !healthRes.ok) return;
       const backups = await backupsRes.json();
       const policy = await policyRes.json();
-      const summary = summaryOverride || {};
+      const health = await healthRes.json();
+      const summary = summaryOverride || health.health || {};
       renderBackups(backups.backups || [], policy, summary);
     }
 

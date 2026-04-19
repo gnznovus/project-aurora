@@ -18,7 +18,11 @@ def test_backup_create_list_validate_flow(client):
 
     create_response = client.post("/superadmin/backups/create")
     assert create_response.status_code == 200
-    backup_id = create_response.json()["backup_id"]
+    create_payload = create_response.json()
+    backup_id = create_payload["backup_id"]
+    assert create_payload["status"] in {"validated", "created"}
+    if create_payload.get("validation"):
+        assert create_payload["validation"]["valid"] is True
 
     list_response = client.get("/superadmin/backups")
     assert list_response.status_code == 200
@@ -33,6 +37,7 @@ def test_backup_create_list_validate_flow(client):
 def test_backup_prune_prunes_old_backups(client):
     _login_superadmin(client)
 
+    client.app.state.settings.backup_prune_min_keep_count = 1
     client.app.state.settings.backup_retention_daily = 1
     client.app.state.settings.backup_retention_weekly = 1
     client.app.state.settings.backup_retention_monthly = 1
@@ -40,8 +45,10 @@ def test_backup_prune_prunes_old_backups(client):
 
     first = client.post("/superadmin/backups/create")
     second = client.post("/superadmin/backups/create")
+    third = client.post("/superadmin/backups/create")
     assert first.status_code == 200
     assert second.status_code == 200
+    assert third.status_code == 200
 
     prune_response = client.post("/superadmin/backups/prune")
     assert prune_response.status_code == 200
@@ -53,7 +60,29 @@ def test_backup_prune_prunes_old_backups(client):
     rows = list_response.json()["backups"]
     statuses = {row["backup_id"]: row["status"] for row in rows}
     assert statuses[first.json()["backup_id"]] in {"created", "validated", "pruned"}
-    assert statuses[second.json()["backup_id"]] in {"created", "validated"}
+    assert statuses[second.json()["backup_id"]] in {"created", "validated", "pruned"}
+
+
+def test_backup_prune_keeps_at_least_one_validated_backup(client):
+    _login_superadmin(client)
+
+    client.app.state.settings.backup_retention_daily = 0
+    client.app.state.settings.backup_retention_weekly = 0
+    client.app.state.settings.backup_retention_monthly = 0
+    client.app.state.settings.backup_prune_min_keep_count = 1
+    client.app.state.settings.backup_max_storage_gb = 0.0000001
+
+    for _ in range(3):
+        response = client.post("/superadmin/backups/create")
+        assert response.status_code == 200
+
+    prune_response = client.post("/superadmin/backups/prune")
+    assert prune_response.status_code == 200
+
+    rows = client.get("/superadmin/backups").json()["backups"]
+    remaining = [row for row in rows if row["status"] != "pruned"]
+    assert remaining
+    assert any(row["status"] == "validated" for row in remaining)
 
 
 def test_backup_validate_detects_corruption(client):
@@ -162,6 +191,17 @@ def test_dashboard_overview_contains_backup_summary(client):
     payload = response.json()
     assert "backup_summary" in payload
     assert "count" in payload["backup_summary"]
+    assert "latest_validated" in payload["backup_summary"]
+
+
+def test_backup_health_endpoint(client):
+    _login_superadmin(client)
+    client.post("/superadmin/backups/create")
+    response = client.get("/superadmin/backups/health")
+    assert response.status_code == 200
+    payload = response.json()["health"]
+    assert "storage_utilization_pct" in payload
+    assert "latest_validated" in payload
 
 
 def test_audit_logs_export_csv(client):

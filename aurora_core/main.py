@@ -25,7 +25,6 @@ from aurora_core.models import (
     AuditLog,
     BackupRecord,
     BackupStatus,
-    Base,
     Execution,
     ExecutionCheckpoint,
     ExecutionStatus,
@@ -58,6 +57,7 @@ from aurora_core.schemas import (
     RegisterPluginResponse,
 )
 from aurora_core.security import get_db, new_agent_id, new_api_key, require_admin_token, require_agent_auth
+from aurora_core.schema_guard import ensure_schema_ready
 from aurora_core.timeutils import utc_now_naive
 
 logger = logging.getLogger("aurora-core")
@@ -68,9 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app_ref: FastAPI):
-        session_factory = app_ref.state.session_factory
-        engine = session_factory.kw["bind"]
-        Base.metadata.create_all(bind=engine)
+        ensure_schema_ready(app_ref.state.settings, auto_repair=app_ref.state.settings.schema_auto_repair_on_startup)
         _bootstrap_superadmin(app_ref)
         scheduler: BackupScheduler = app_ref.state.backup_scheduler
         scheduler.start()
@@ -1011,6 +1009,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         actor = _require_superadmin_session(request)
         service: BackupService = request.app.state.backup_service
         result = service.create_backup(created_by=actor["username"])
+        validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
         _write_audit_log(
             request.app.state.session_factory(),
             actor_username=actor["username"],
@@ -1018,7 +1017,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             action="backup.create",
             resource_type="backup",
             resource_id=result["backup_id"],
-            details={"size_bytes": result["size_bytes"]},
+            details={
+                "size_bytes": result["size_bytes"],
+                "status": result.get("status"),
+                "valid": bool(validation.get("valid")) if validation else None,
+                "offsite_synced": bool((result.get("offsite") or {}).get("synced")),
+            },
             ip_address=_request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
@@ -1086,6 +1090,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "daily": settings_obj.backup_retention_daily,
                 "weekly": settings_obj.backup_retention_weekly,
                 "monthly": settings_obj.backup_retention_monthly,
+                "min_keep_count": settings_obj.backup_prune_min_keep_count,
             },
             "scheduler": {
                 "enabled": settings_obj.backup_scheduler_enabled,
@@ -1094,10 +1099,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "prune_minutes": settings_obj.backup_schedule_prune_minutes,
                 "restore_drill_minutes": settings_obj.backup_schedule_restore_drill_minutes,
             },
+            "defaults": {
+                "validate_after_create": settings_obj.backup_validate_after_create,
+            },
             "offsite_dir": str(settings_obj.backup_offsite_dir) if settings_obj.backup_offsite_dir else None,
             "non_pruned_count": int(non_pruned),
             "maintenance_mode": service.get_maintenance_mode(),
         }
+
+    @app.get("/superadmin/backups/health")
+    def superadmin_backup_health(request: Request) -> dict:
+        _require_superadmin_session(request)
+        service: BackupService = request.app.state.backup_service
+        return {"health": service.backup_summary()}
 
     @app.post("/superadmin/backups/{backup_id}/offsite-sync")
     def superadmin_backup_offsite_sync(request: Request, backup_id: str) -> dict:

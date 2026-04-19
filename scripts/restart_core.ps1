@@ -7,6 +7,27 @@ New-Item -ItemType Directory -Path $runDir -Force | Out-Null
 $corePidFile = Join-Path $runDir "core.pid"
 $coreOut = Join-Path $root "core.log"
 $coreErr = Join-Path $root "core.err.log"
+$activeVenvPython = $null
+if ($env:VIRTUAL_ENV) {
+    $candidate = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
+    if (Test-Path $candidate) { $activeVenvPython = $candidate }
+}
+$projectVenvPython = Join-Path $root ".venv\Scripts\python.exe"
+$pythonCmd = if ($activeVenvPython) {
+    $activeVenvPython
+} elseif (Test-Path $projectVenvPython) {
+    $projectVenvPython
+} else {
+    "python"
+}
+
+function Assert-PythonModules([string]$pythonPath, [string[]]$modules) {
+    $importList = ($modules | ForEach-Object { "'$_'" }) -join ", "
+    & $pythonPath -c "import importlib.util, sys; mods=[$importList]; missing=[m for m in mods if importlib.util.find_spec(m) is None]; print(','.join(missing)); sys.exit(1 if missing else 0)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Missing Python modules in selected environment ($pythonPath). Install dependencies first: pip install -e .[dev]"
+    }
+}
 
 function Get-CoreProcess() {
     if (-not (Test-Path $corePidFile)) { return $null }
@@ -29,8 +50,21 @@ if (Test-Path $corePidFile) {
 if (Test-Path $coreOut) { Remove-Item $coreOut -Force -ErrorAction SilentlyContinue }
 if (Test-Path $coreErr) { Remove-Item $coreErr -Force -ErrorAction SilentlyContinue }
 
+Assert-PythonModules -pythonPath $pythonCmd -modules @("alembic", "uvicorn")
+
+Write-Host "[aurora] Applying database migrations..."
+Push-Location $root
+try {
+    & $pythonCmd -m alembic upgrade head
+    if ($LASTEXITCODE -ne 0) {
+        throw "alembic upgrade head failed with exit code $LASTEXITCODE"
+    }
+} finally {
+    Pop-Location
+}
+
 Write-Host "[aurora] Starting Core..."
-$p = Start-Process -FilePath "python" `
+$p = Start-Process -FilePath $pythonCmd `
     -ArgumentList @("-m", "uvicorn", "aurora_core.main:app", "--host", "127.0.0.1", "--port", "8000", "--no-access-log", "--log-level", "warning") `
     -WorkingDirectory $root `
     -RedirectStandardOutput $coreOut `

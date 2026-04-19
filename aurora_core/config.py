@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     backup_schedule_validate_minutes: int = 1440
     backup_schedule_prune_minutes: int = 1440
     backup_schedule_restore_drill_minutes: int = 10080
+    backup_validate_after_create: bool = True
+    backup_prune_min_keep_count: int = 2
+    schema_auto_repair_on_startup: bool = True
 
     heartbeat_ttl_seconds: int = 60
     lease_ttl_seconds: int = 90

@@ -100,13 +100,32 @@ class BackupService:
         finally:
             db.close()
 
+        validation_result: dict[str, Any] | None = None
+        if self._settings.backup_validate_after_create:
+            validation_result = self.validate_backup(backup_id)
+
+        db = self._session_factory()
+        try:
+            refreshed = db.scalar(select(BackupRecord).where(BackupRecord.id == backup_id))
+        finally:
+            db.close()
+
+        offsite_payload: dict[str, Any]
+        if self._offsite_root and validation_result and validation_result.get("valid"):
+            offsite_payload = self.sync_backup_offsite(backup_id)
+        elif self._offsite_root:
+            offsite_payload = {"enabled": True, "found": True, "synced": False, "reason": "skipped: backup not validated"}
+        else:
+            offsite_payload = {"enabled": False}
+
         return {
             "backup_id": backup_id,
             "created_at": now.isoformat(),
             "size_bytes": size_bytes,
             "storage_path": str(backup_dir),
-            "status": BackupStatus.created.value,
-            "offsite": self.sync_backup_offsite(backup_id) if self._offsite_root else {"enabled": False},
+            "status": refreshed.status.value if refreshed else BackupStatus.created.value,
+            "validation": validation_result,
+            "offsite": offsite_payload,
         }
 
     def list_backups(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -185,12 +204,16 @@ class BackupService:
             prunable = [row for row in reversed(rows) if row.id not in keep_ids]
             pruned_ids: list[str] = []
             reclaimed = 0
+            remaining_validated = sum(1 for row in rows if row.status == BackupStatus.validated)
 
             for row in prunable:
+                if row.status == BackupStatus.validated and remaining_validated <= 1:
+                    continue
                 should_prune_for_retention = True
                 should_prune_for_size = total_bytes > max_bytes
                 if not should_prune_for_retention and not should_prune_for_size:
                     continue
+                was_validated = row.status == BackupStatus.validated
                 target = Path(row.storage_path)
                 if target.exists():
                     shutil.rmtree(target, ignore_errors=True)
@@ -199,6 +222,8 @@ class BackupService:
                 row.status = BackupStatus.pruned
                 row.validation_message = "pruned by retention policy"
                 pruned_ids.append(row.id)
+                if was_validated:
+                    remaining_validated = max(0, remaining_validated - 1)
 
             db.commit()
             return {
@@ -206,6 +231,7 @@ class BackupService:
                 "pruned_ids": pruned_ids,
                 "reclaimed_bytes": reclaimed,
                 "remaining_bytes": total_bytes,
+                "remaining_validated": remaining_validated,
             }
         finally:
             db.close()
@@ -354,15 +380,36 @@ class BackupService:
                     .order_by(BackupRecord.created_at.desc())
                 )
             )
+            recent_backup_events = list(
+                db.scalars(
+                    select(AuditLog)
+                    .where(AuditLog.action.like("backup.%"))
+                    .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                    .limit(30)
+                )
+            )
         finally:
             db.close()
         total_size = sum(max(0, row.size_bytes) for row in rows)
         latest = rows[0] if rows else None
+        latest_validated = next((row for row in rows if row.status == BackupStatus.validated), None)
+        latest_invalid = next((row for row in rows if row.status in {BackupStatus.invalid, BackupStatus.failed}), None)
+        util_denominator = int(max(0.0, self._settings.backup_max_storage_gb) * 1024 * 1024 * 1024)
+        utilization_pct = 0
+        if util_denominator > 0:
+            utilization_pct = int(min(100, round((total_size / util_denominator) * 100)))
+        last_failure_event = next((e for e in recent_backup_events if self._is_backup_event_failure(e)), None)
+        last_success_event = next((e for e in recent_backup_events if self._is_backup_event_success(e)), None)
         return {
             "count": len(rows),
             "total_size_bytes": total_size,
-            "max_storage_bytes": int(max(0.0, self._settings.backup_max_storage_gb) * 1024 * 1024 * 1024),
+            "max_storage_bytes": util_denominator,
+            "storage_utilization_pct": utilization_pct,
             "latest": self._serialize_backup_row(latest) if latest else None,
+            "latest_validated": self._serialize_backup_row(latest_validated) if latest_validated else None,
+            "latest_issue": self._serialize_backup_row(latest_invalid) if latest_invalid else None,
+            "last_success_event": self._serialize_audit_event(last_success_event) if last_success_event else None,
+            "last_failure_event": self._serialize_audit_event(last_failure_event) if last_failure_event else None,
             "offsite_enabled": self._offsite_root is not None,
             "offsite_path": str(self._offsite_root) if self._offsite_root else None,
         }
@@ -402,8 +449,9 @@ class BackupService:
 
     def _select_keep_ids(self, rows_desc: list[BackupRecord]) -> set[str]:
         keep_ids: set[str] = set()
-        latest = rows_desc[0]
-        keep_ids.add(latest.id)
+        min_keep = max(1, int(self._settings.backup_prune_min_keep_count))
+        for row in rows_desc[:min_keep]:
+            keep_ids.add(row.id)
 
         latest_validated = next((row for row in rows_desc if row.status == BackupStatus.validated), None)
         if latest_validated:
@@ -617,6 +665,39 @@ class BackupService:
             "validation_message": row.validation_message,
             "manifest": row.manifest_json,
         }
+
+    def _serialize_audit_event(self, row: AuditLog) -> dict[str, Any]:
+        return {
+            "at": row.created_at.isoformat() if row.created_at else None,
+            "action": row.action,
+            "resource_id": row.resource_id,
+            "details": row.details or {},
+        }
+
+    def _is_backup_event_success(self, row: AuditLog) -> bool:
+        details = row.details or {}
+        if row.action in {"backup.create", "backup.validate", "backup.offsite_sync", "backup.prune", "backup.restore.dry_run", "backup.restore"}:
+            if isinstance(details.get("ok"), bool):
+                return bool(details.get("ok"))
+            if isinstance(details.get("valid"), bool):
+                return bool(details.get("valid"))
+            if row.action == "backup.create":
+                return True
+            return True
+        return False
+
+    def _is_backup_event_failure(self, row: AuditLog) -> bool:
+        details = row.details or {}
+        if row.action in {"backup.validate", "backup.restore", "backup.restore.dry_run", "backup.offsite_sync"}:
+            if isinstance(details.get("ok"), bool):
+                return not bool(details.get("ok"))
+            if isinstance(details.get("valid"), bool):
+                return not bool(details.get("valid"))
+        if row.action == "backup.create":
+            status = str(details.get("status", "")).lower()
+            if status in {"invalid", "failed"}:
+                return True
+        return False
 
     def _sha256_file(self, path: Path) -> str:
         digest = hashlib.sha256()

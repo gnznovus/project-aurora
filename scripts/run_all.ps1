@@ -1,5 +1,6 @@
 param(
-    [switch]$RestartExisting
+    [switch]$RestartExisting,
+    [switch]$SkipMigrate
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +15,19 @@ $coreOut = Join-Path $root "core.log"
 $coreErr = Join-Path $root "core.err.log"
 $agentOut = Join-Path $root "agent.log"
 $agentErr = Join-Path $root "agent.err.log"
+$activeVenvPython = $null
+if ($env:VIRTUAL_ENV) {
+    $candidate = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
+    if (Test-Path $candidate) { $activeVenvPython = $candidate }
+}
+$projectVenvPython = Join-Path $root ".venv\Scripts\python.exe"
+$pythonCmd = if ($activeVenvPython) {
+    $activeVenvPython
+} elseif (Test-Path $projectVenvPython) {
+    $projectVenvPython
+} else {
+    "python"
+}
 
 function Get-RunningProcessFromPidFile([string]$pidFile) {
     if (-not (Test-Path $pidFile)) { return $null }
@@ -54,12 +68,37 @@ function Start-TrackedProcess(
     return $p
 }
 
+function Assert-PythonModules([string]$pythonPath, [string[]]$modules) {
+    $importList = ($modules | ForEach-Object { "'$_'" }) -join ", "
+    & $pythonPath -c "import importlib.util, sys; mods=[$importList]; missing=[m for m in mods if importlib.util.find_spec(m) is None]; print(','.join(missing)); sys.exit(1 if missing else 0)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Missing Python modules in selected environment ($pythonPath). Install dependencies first: pip install -e .[dev]"
+    }
+}
+
 Write-Host "[aurora] Starting Docker services..."
 Push-Location $root
 try {
     docker compose up -d | Out-Host
 } finally {
     Pop-Location
+}
+
+if ($SkipMigrate) {
+    Assert-PythonModules -pythonPath $pythonCmd -modules @("uvicorn")
+    Write-Host "[aurora] Skipping database migrations (--SkipMigrate)."
+} else {
+    Assert-PythonModules -pythonPath $pythonCmd -modules @("alembic", "uvicorn")
+    Write-Host "[aurora] Applying database migrations..."
+    Push-Location $root
+    try {
+        & $pythonCmd -m alembic upgrade head
+        if ($LASTEXITCODE -ne 0) {
+            throw "alembic upgrade head failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 $existingCore = Get-RunningProcessFromPidFile $corePidFile
@@ -75,7 +114,7 @@ if ($RestartExisting) {
 if (-not $existingCore) {
     Write-Host "[aurora] Starting Core..."
     $core = Start-TrackedProcess `
-        -filePath "python" `
+        -filePath $pythonCmd `
         -arguments @("-m", "uvicorn", "aurora_core.main:app", "--host", "127.0.0.1", "--port", "8000", "--no-access-log", "--log-level", "warning") `
         -pidFile $corePidFile `
         -stdoutFile $coreOut `
@@ -87,7 +126,7 @@ if (-not $existingCore) {
 if (-not $existingAgent) {
     Write-Host "[aurora] Starting Agent..."
     $agent = Start-TrackedProcess `
-        -filePath "python" `
+        -filePath $pythonCmd `
         -arguments @("-m", "aurora_agent.worker") `
         -pidFile $agentPidFile `
         -stdoutFile $agentOut `
@@ -118,3 +157,4 @@ Write-Host "Core log:  $coreOut"
 Write-Host "Agent log: $agentOut"
 Write-Host ""
 Write-Host "To force restart both: .\\scripts\\run_all.ps1 -RestartExisting"
+Write-Host "To skip migration once: .\\scripts\\run_all.ps1 -SkipMigrate"
