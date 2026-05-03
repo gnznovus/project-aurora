@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request, status
 from sqlalchemy import select
 
-from aurora_core.models import SystemFlag
+from aurora_core.services.models import SystemFlag
 
 
 def is_maintenance_mode(request: Request) -> dict:
@@ -33,3 +33,4 @@ def ensure_not_maintenance_mode(request: Request, action: str) -> None:
             "updated_at": maintenance.get("updated_at"),
         },
     )
+

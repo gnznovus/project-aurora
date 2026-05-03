@@ -138,7 +138,12 @@ sequenceDiagram
 
 ## Repository Layout
 
-- `aurora_core/` - orchestration API, routing, dashboard endpoints, auth
+- `aurora_core/main.py` - app bootstrap, lifespan, and router registration
+- `aurora_core/config.py` - settings model and environment binding
+- `aurora_core/db.py` - SQLAlchemy session factory wiring
+- `aurora_core/routes/` - domain route modules (`auth`, `operations`, `dashboard`, `superadmin`)
+- `aurora_core/services/` - business/domain services, models, schemas, auth/security, queue/routing
+- `aurora_core/utils/` - shared utility helpers
 - `aurora_agent/` - polling worker runtime and plugin execution loop
 - `plugins/` - plugin artifacts served by core
 - `migrations/` - Alembic migration history
@@ -152,7 +157,7 @@ sequenceDiagram
 ### 1. Install
 
 ```bash
-pip install -e .[dev]
+python -m pip install -e ".[dev]"
 ```
 
 ### 2. Start Everything (Windows PowerShell)

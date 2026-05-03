@@ -6,8 +6,8 @@ from datetime import timedelta
 from sqlalchemy import Select, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from aurora_core.models import Agent, Job, JobStatus
-from aurora_core.timeutils import utc_now_naive
+from aurora_core.services.models import Agent, Job, JobStatus
+from aurora_core.utils.timeutils import utc_now_naive
 
 
 class RoutingStrategy(ABC):
@@ -51,3 +51,4 @@ class DefaultStaticRoutingStrategy(RoutingStrategy):
             return []
         jobs = list(db.scalars(self._base_query().limit(limit)))
         return [job for job in jobs if self.is_eligible(agent, job)]
+

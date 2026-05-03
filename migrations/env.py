@@ -6,7 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from aurora_core.config import get_settings
-from aurora_core.models import Base
+from aurora_core.services.models import Base
 
 config = context.config
 
@@ -51,4 +51,5 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
 

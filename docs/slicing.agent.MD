@@ -1,46 +1,121 @@
-﻿# Large File Slicing Playbook
+﻿# Large File Slicing Guide
 
-Use this playbook before modifying large controller files (for example `main.py`).
+Use this guide before modifying large files (e.g., `main.py`).
 
 ## Goal
 
-Reduce token and risk by moving route domains into focused modules.
+Improve structure and maintainability by moving domain-based route logic into dedicated modules.
 
-## Slicing Order
+---
 
-1. `routes/auth.py`
-2. `routes/agents.py`
-3. `routes/jobs.py`
-4. `routes/plugins.py`
-5. `routes/superadmin_backup.py`
-6. `routes/dashboard.py`
+## Core Principle
+
+Slice by **domain (feature)**, not by file size or individual endpoints.
+
+Each domain groups related routes under a shared purpose or path prefix.
+Each domain MUST map to exactly one route file.
+
+---
 
 ## Guardrails
 
 1. Move one domain at a time.
-2. Keep endpoint paths and response shapes unchanged.
-3. Keep shared helpers in a dedicated `services/` or `utils/` module.
-4. Add/import router with clear prefix and tags.
-5. Run targeted tests after every slice.
+2. Do not change behavior during slicing (no mixed refactor + feature).
+3. Keep endpoint paths and response shapes unchanged.
+4. Keep route layer thin; move business logic to `services/` when applicable.
+5. Place shared helpers in `utils/`.
+
+---
+
+## File Structure Rules
+
+* Route handlers → `routes/<domain>.py`
+* Business logic → `services/<domain>_service.py`
+* Shared helpers → `utils/`
+
+### Constraints
+
+* MUST use existing directories (`routes/`, `services/`, `utils/`) if they already exist.
+* MUST NOT create equivalent files in root when a matching directory exists.
+* MUST NOT split a single domain across multiple route files.
+* MUST NOT create one file per endpoint.
+
+### Root Directory Rules
+
+Only allowed files in root:
+
+* `main.py`
+* `config.py`
+* `db.py` (optional)
+
+All other files MUST be placed in the appropriate subdirectory.
+
+---
+
+## When to Slice
+
+Apply slicing when one or more of the following conditions are met:
+
+* File size exceeds ~500 LOC
+* Multiple domains (features) exist in the same file
+* Navigation becomes difficult (cannot locate logic quickly)
+* Repeated patterns or logic duplication appear
+* Changes require scanning large portions of the file
+
+Do NOT slice when:
+
+* The file contains a single, clear domain
+* The file is small and easy to understand
+* Slicing would create unnecessary fragmentation
+
+Prefer slicing by domain boundaries over file size alone.
+
+---
+
+## Slicing Process
+
+1. Identify a domain (by route prefix or feature group).
+2. Extract:
+
+   * route handlers → `routes/<domain>.py`
+   * move non-HTTP logic → `services/` (if present)
+3. Replace original code with router import and registration.
+4. Verify imports and dependencies.
+5. Validate application startup and affected routes.
+6. If structure or placement is unclear, stop and do not create new patterns.
+
+---
 
 ## Per-Slice Checklist
 
-1. Move handlers + local helper functions.
-2. Wire router into app factory.
-3. Run domain tests.
-4. Smoke test startup.
-5. Commit checkpoint.
+* Handlers moved to correct domain file
+* Router registered in `main.py`
+* No behavior changes introduced
+* Imports resolved correctly
+* Application runs without errors
+
+---
 
 ## Rollback Plan
 
 If a slice fails:
 
-1. Revert only the current slice commit.
-2. Keep prior successful slices.
-3. Resume from last green checkpoint.
+1. Revert only the current slice.
+2. Keep previous successful slices.
+3. Resume from last stable state.
+
+---
 
 ## Done Definition
 
-1. `main.py` only contains app factory, dependency wiring, and router registration.
-2. Route logic lives in domain modules.
-3. Tests pass for moved domains.
+* `main.py` contains only:
+
+  * app initialization
+  * middleware
+  * router registration
+
+* All routes are organized by domain in `routes/`
+
+* Business logic is separated when appropriate
+
+* No misplaced files outside defined structure

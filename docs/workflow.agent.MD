@@ -1,44 +1,93 @@
 ﻿# Token-Efficient Workflow Rules
 
-This file defines default collaboration rules to minimize token usage while keeping engineering quality high.
+Defines how to minimize token usage while maintaining engineering quality.
+
+---
 
 ## Core Principles
 
-1. Work in small scoped batches.
-2. Read only the code needed for the current task.
-3. Prefer targeted tests over full-suite runs during iteration.
-4. Ship checkpoint commits early when risk or token budget is tight.
-5. Avoid broad refactors unless explicitly approved.
+1. Work in small, scoped batches.
+2. Read only the code required for the current task.
+3. Prefer targeted validation over full-suite runs during iteration.
+4. Commit early when risk or token usage increases.
+5. Avoid broad refactors unless explicitly requested.
+
+---
 
 ## Default Operating Rules
 
-1. Search first with `rg`, then open only matching files/line ranges.
-2. Never open very large files end-to-end unless required.
-3. For large files, patch isolated functions by line range.
-4. Keep each turn to up to 3 concrete changes.
-5. Use short progress updates and concise final summaries.
-6. Reuse existing helpers/modules before adding new abstractions.
-7. Run only affected tests first, then wider tests when stable.
-8. Commit checkpoint after each stable milestone.
+1. Search first (`rg` or equivalent), then open only matching files or line ranges.
+2. Do NOT open large files (>600 LOC) end-to-end unless absolutely required.
+3. Once a section is identified, operate only on that section.
+4. Do NOT re-read the same large file multiple times in a single task.
+5. Limit each iteration to a small number of concrete changes (≤3 logical changes).
+6. Use concise progress updates and summaries.
+7. Reuse existing modules before introducing new abstractions.
+8. Validate only affected areas first, expand scope only when stable.
+9. Commit after each stable, verified step.
 
-## Large File Rule (`> 600` lines)
+---
 
-1. Build a function map via symbol/search.
-2. Touch only local sections for the active task.
-3. If repeated edits are needed, split file into modules first.
-4. Keep behavior unchanged during structural split (no mixed refactor+feature).
+## Large File Handling (`> 600` LOC)
 
-## Recommended Commit Strategy
+1. Build a structure map using search/symbol tools.
+2. Identify exact regions before making changes.
+3. Modify only targeted sections; avoid full-file rewrites.
+4. If multiple regions must be edited repeatedly, apply slicing (see slicing rules).
+5. Do not mix structural changes with feature changes.
 
-1. `checkpoint: docs + stable runtime fixes`
-2. `checkpoint: scoped feature slice`
-3. `checkpoint: tests + docs`
+---
+
+## Read Strategy
+
+* Prefer:
+
+  * symbol lookup
+  * search hits
+  * partial file reads
+
+* Avoid:
+
+  * full file scans
+  * repeated reads of the same content
+  * loading unrelated files
+
+---
+
+## Change Strategy
+
+* Make minimal, localized edits.
+* Avoid cascading changes across multiple files unless necessary.
+* Do not introduce new patterns unless required by the task.
+* Preserve existing structure and naming unless explicitly improving it.
+
+---
+
+## Commit Strategy
+
+Use small, descriptive checkpoint commits:
+
+* `checkpoint: stable fix`
+* `checkpoint: scoped change`
+* `checkpoint: tests + validation`
+
+---
+
+## Failure Handling
+
+If token usage becomes high or scope expands:
+
+1. Stop adding new changes.
+2. Commit current stable state.
+3. Continue in a new iteration with reduced scope.
+
+---
 
 ## Reuse Across Projects
 
-Copy this file into any project and adapt:
+This file is portable. Adapt only:
 
-- commands/scripts location
-- preferred test command
-- large-file threshold
-- commit naming convention
+* command/tooling specifics
+* test commands
+* file size thresholds
+* commit conventions

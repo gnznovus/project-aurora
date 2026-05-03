@@ -7,11 +7,11 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import select
 
-from aurora_core.auth_utils import verify_password
-from aurora_core.dashboard_html import DASHBOARD_HTML, LOGIN_HTML
-from aurora_core.models import User, UserRole
-from aurora_core.timeutils import utc_now_naive
-from aurora_core.web_auth import get_dashboard_user, request_ip, write_audit_log
+from aurora_core.utils.auth_utils import verify_password
+from aurora_core.services.dashboard_html import DASHBOARD_HTML, LOGIN_HTML
+from aurora_core.services.models import User, UserRole
+from aurora_core.utils.timeutils import utc_now_naive
+from aurora_core.services.web_auth import get_dashboard_user, request_ip, write_audit_log
 
 
 router = APIRouter()
@@ -112,3 +112,4 @@ def dashboard_auth_status(request: Request) -> dict:
         "role": actor["role"],
         "is_superadmin": actor["role"] == UserRole.superadmin.value,
     }
+

@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from aurora_core.timeutils import utc_now_naive
+from aurora_core.utils.timeutils import utc_now_naive
 
 
 class Base(DeclarativeBase):
@@ -187,3 +187,4 @@ class SystemFlag(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utc_now_naive, nullable=False)
+

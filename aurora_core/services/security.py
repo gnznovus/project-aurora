@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aurora_core.config import Settings
-from aurora_core.models import Agent
+from aurora_core.services.models import Agent
 
 
 def new_agent_id() -> str:
@@ -50,3 +50,4 @@ def require_agent_auth(
     if not agent or agent.api_key != x_agent_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid agent credentials")
     return agent
+

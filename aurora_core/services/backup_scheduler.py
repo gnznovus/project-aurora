@@ -5,10 +5,10 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from aurora_core.backup_service import BackupService
+from aurora_core.services.backup_service import BackupService
 from aurora_core.config import Settings
-from aurora_core.models import AuditLog
-from aurora_core.timeutils import utc_now_naive
+from aurora_core.services.models import AuditLog
+from aurora_core.utils.timeutils import utc_now_naive
 
 logger = logging.getLogger("aurora-core")
 
@@ -97,3 +97,4 @@ class BackupScheduler:
             db.commit()
         finally:
             db.close()
+

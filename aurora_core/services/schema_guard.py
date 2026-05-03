@@ -11,7 +11,7 @@ from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 
 from aurora_core.config import Settings
-from aurora_core.models import Base
+from aurora_core.services.models import Base
 
 logger = logging.getLogger("aurora-core")
 
@@ -92,7 +92,7 @@ def _infer_revision(engine: Engine) -> str | None:
 
 
 def _build_alembic_config(settings: Settings) -> Config:
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[2]
     config = Config(str(project_root / "alembic.ini"))
     config.set_main_option("script_location", str(project_root / "migrations"))
     config.set_main_option("sqlalchemy.url", settings.database_url)
@@ -103,3 +103,4 @@ def _engine_from_url(database_url: str) -> Engine:
     from sqlalchemy import create_engine
 
     return create_engine(database_url, future=True)
+

@@ -12,8 +12,8 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from aurora_core.config import Settings
-from aurora_core.maintenance import ensure_not_maintenance_mode
-from aurora_core.models import (
+from aurora_core.services.maintenance import ensure_not_maintenance_mode
+from aurora_core.services.models import (
     Agent,
     Execution,
     ExecutionCheckpoint,
@@ -23,10 +23,10 @@ from aurora_core.models import (
     Plugin,
     PluginVersion,
 )
-from aurora_core.plugin_store import PluginStore
-from aurora_core.queue import QueueAdapter
-from aurora_core.routing import DefaultStaticRoutingStrategy
-from aurora_core.schemas import (
+from aurora_core.services.plugin_store import PluginStore
+from aurora_core.services.queue import QueueAdapter
+from aurora_core.services.routing import DefaultStaticRoutingStrategy
+from aurora_core.services.schemas import (
     AgentInfo,
     EnqueueJobRequest,
     EnqueueJobResponse,
@@ -43,9 +43,9 @@ from aurora_core.schemas import (
     RegisterPluginRequest,
     RegisterPluginResponse,
 )
-from aurora_core.security import get_db, new_agent_id, new_api_key, require_admin_token, require_agent_auth
-from aurora_core.timeutils import utc_now_naive
-from aurora_core.web_auth import audit_important_action
+from aurora_core.services.security import get_db, new_agent_id, new_api_key, require_admin_token, require_agent_auth
+from aurora_core.utils.timeutils import utc_now_naive
+from aurora_core.services.web_auth import audit_important_action
 
 logger = logging.getLogger("aurora-core")
 router = APIRouter()
@@ -594,3 +594,4 @@ def _recover_stale_leases(db: Session, queue: QueueAdapter) -> None:
             agent.active_leases -= 1
 
     db.commit()
+

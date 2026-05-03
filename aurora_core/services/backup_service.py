@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.sqltypes import DateTime, Enum as SqlEnum
 
 from aurora_core.config import Settings
-from aurora_core.models import (
+from aurora_core.services.models import (
     Agent,
     AuditLog,
     BackupRecord,
@@ -27,7 +27,7 @@ from aurora_core.models import (
     SystemFlag,
     User,
 )
-from aurora_core.timeutils import utc_now_naive
+from aurora_core.utils.timeutils import utc_now_naive
 
 
 _MODEL_DUMP_ORDER = (
@@ -713,3 +713,4 @@ class BackupService:
         ts = utc_now_naive().strftime("%Y%m%d_%H%M%S")
         suffix = secrets.token_hex(2).upper()
         return f"BKP_{ts}_{suffix}"
+

@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from aurora_core.models import AuditLog, UserRole
-from aurora_core.timeutils import utc_now_naive
+from aurora_core.services.models import AuditLog, UserRole
+from aurora_core.utils.timeutils import utc_now_naive
 
 
 def get_dashboard_user(request: Request) -> dict | None:
@@ -95,3 +95,4 @@ def audit_important_action(
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+
