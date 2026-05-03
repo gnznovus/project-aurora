@@ -169,6 +169,51 @@ def test_maintenance_mode_blocks_mutation_endpoints(client):
         service.set_maintenance_mode(enabled=False, actor="test", reason="unit-test-finished")
 
 
+def test_maintenance_mode_blocks_mutation_matrix(client):
+    _login_superadmin(client)
+    service = client.app.state.backup_service
+    service.set_maintenance_mode(enabled=True, actor="test", reason="unit-test-matrix")
+    try:
+        cases = [
+            (
+                "/plugins/register",
+                {
+                    "headers": {"X-Admin-Token": "test-admin"},
+                    "json": {
+                        "name": "echo",
+                        "version": "1.0.0",
+                        "filename": "echo_plugin.py",
+                        "timeout_seconds": 1,
+                    },
+                },
+            ),
+            (
+                "/jobs",
+                {
+                    "headers": {"X-Admin-Token": "test-admin"},
+                    "json": {
+                        "plugin_name": "echo",
+                        "plugin_version": "1.0.0",
+                        "payload": {"message": "hello"},
+                        "required_tags": ["default"],
+                    },
+                },
+            ),
+            (
+                "/superadmin/users",
+                {
+                    "json": {"username": "blocked_user", "password": "secret123", "role": "operator"},
+                },
+            ),
+            ("/superadmin/debug/enqueue-random", {}),
+        ]
+        for path, kwargs in cases:
+            response = client.post(path, **kwargs)
+            assert response.status_code == 503, f"expected 503 for {path}, got {response.status_code}"
+    finally:
+        service.set_maintenance_mode(enabled=False, actor="test", reason="unit-test-matrix-finished")
+
+
 def test_backup_offsite_sync_endpoint(client):
     _login_superadmin(client)
     created = client.post("/superadmin/backups/create")
@@ -222,6 +267,23 @@ def test_backup_manifest_download(client):
     assert response.status_code == 200
     assert "application/json" in response.headers.get("content-type", "")
     assert "backup_id" in response.text
+
+
+def test_backup_offsite_sync_not_found(client):
+    _login_superadmin(client)
+    response = client.post("/superadmin/backups/bkp_missing/offsite-sync")
+    assert response.status_code == 404
+
+
+def test_backup_restore_apply_requires_confirmation(client):
+    _login_superadmin(client)
+    created = client.post("/superadmin/backups/create")
+    assert created.status_code == 200
+    backup_id = created.json()["backup_id"]
+
+    response = client.post(f"/superadmin/backups/{backup_id}/restore?dry_run=false")
+    assert response.status_code == 400
+    assert "confirmation required" in response.json()["detail"]
 
 
 def test_debug_enqueue_random_requires_auth(client):
