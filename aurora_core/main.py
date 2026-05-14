@@ -30,6 +30,7 @@ logger = logging.getLogger("aurora-core")
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     effective_settings = settings or get_settings()
+    _validate_startup_security(effective_settings)
 
     @asynccontextmanager
     async def lifespan(app_ref: FastAPI):
@@ -70,9 +71,6 @@ def _build_queue(settings: Settings) -> QueueAdapter:
     return RedisQueue(settings.redis_url, settings.queue_name)
 
 
-app = create_app()
-
-
 def _bootstrap_superadmin(app_ref: FastAPI) -> None:
     settings_obj: Settings = app_ref.state.settings
     db = app_ref.state.session_factory()
@@ -96,3 +94,20 @@ def _bootstrap_superadmin(app_ref: FastAPI) -> None:
         db.close()
 
 
+def _validate_startup_security(settings: Settings) -> None:
+    env = (settings.deployment_env or "dev").strip().lower()
+    if env in {"dev", "local", "test"}:
+        return
+
+    using_default_superadmin = (
+        settings.superadmin_username.strip() == "superadmin"
+        and settings.superadmin_password.strip() == "superadmin"
+    )
+    if using_default_superadmin:
+        raise RuntimeError(
+            "unsafe production configuration: default superadmin credentials detected. "
+            "Set AURORA_SUPERADMIN_USERNAME and AURORA_SUPERADMIN_PASSWORD."
+        )
+
+
+app = create_app()

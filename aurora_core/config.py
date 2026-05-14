@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     admin_token: str = "aurora-admin-token"
     superadmin_username: str = "superadmin"
     superadmin_password: str = "superadmin"
+    deployment_env: str = "dev"
     backup_dir: Path = Path("backups")
     backup_max_storage_gb: float = 20.0
     backup_retention_daily: int = 7

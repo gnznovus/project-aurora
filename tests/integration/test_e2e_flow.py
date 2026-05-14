@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
 
 import pytest
@@ -45,6 +46,7 @@ def test_e2e_single_job_roundtrip():
         timeout=10,
     )
     enqueue_resp.raise_for_status()
+    job_id = enqueue_resp.json()["job_id"]
 
     settings = AgentSettings(
         core_url=base_url,
@@ -56,3 +58,20 @@ def test_e2e_single_job_roundtrip():
     worker = AgentWorker(settings)
     worker.run_once()
 
+    # Validate terminal status instead of only exercising API calls.
+    deadline = time.time() + 20
+    last_payload: dict | None = None
+    while time.time() < deadline:
+        progress_resp = requests.get(
+            f"{base_url}/jobs/{job_id}/progress",
+            headers={"X-Admin-Token": admin_token},
+            timeout=10,
+        )
+        progress_resp.raise_for_status()
+        last_payload = progress_resp.json()
+        if last_payload["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.5)
+
+    assert last_payload is not None
+    assert last_payload["status"] == "completed"
