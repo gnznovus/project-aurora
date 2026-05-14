@@ -504,6 +504,13 @@ DASHBOARD_HTML = """<!doctype html>
           <button id="backup-dryrun">Test restore</button>
           <button id="backup-apply" class="btn-danger">Run restore</button>
         </div>
+        <div class="sa-box" style="margin-bottom: 8px;">
+          <h3 class="title">Selected backup details</h3>
+          <div id="backup-selected-details" class="mini">Select a backup to inspect metadata.</div>
+          <div id="backup-restore-guard" class="mini" style="margin-top: 8px; color: #ffd183;">
+            Safety guard: run <strong>Test restore</strong> for the selected backup before <strong>Run restore</strong>.
+          </div>
+        </div>
         <div id="backup-msg" class="sa-msg"></div>
         <div class="sa-backup-table">
           <table class="table">
@@ -535,6 +542,8 @@ DASHBOARD_HTML = """<!doctype html>
     function toNum(v, fallback = 0) { const n = Number(v); return Number.isFinite(n) ? n : fallback; }
     let activeTab = "home";
     let autoRefreshTimer = null;
+    let backupRowsById = {};
+    let lastDryRunBackupId = null;
 
     function formatDateTime(value) {
       if (!value) return "-";
@@ -766,8 +775,41 @@ DASHBOARD_HTML = """<!doctype html>
       return `${(n / (1024 * 1024)).toFixed(2)} MB`;
     }
 
+    function renderBackupSelectionDetails() {
+      const detailsEl = document.getElementById("backup-selected-details");
+      const guardEl = document.getElementById("backup-restore-guard");
+      const id = document.getElementById("backup-select").value;
+      const row = backupRowsById[id];
+      if (!id || !row) {
+        detailsEl.textContent = "Select a backup to inspect metadata.";
+        guardEl.innerHTML = 'Safety guard: run <strong>Test restore</strong> for the selected backup before <strong>Run restore</strong>.';
+        return;
+      }
+      const storagePath = row.storage_path || row.path || "-";
+      const createdBy = row.created_by || "system";
+      const validatedAt = row.validated_at ? formatDateTime(row.validated_at) : "-";
+      const status = row.status || "unknown";
+      const offsite = row.offsite_synced === true ? "yes" : (row.offsite_synced === false ? "no" : "unknown");
+      detailsEl.innerHTML = [
+        `<div><strong>ID:</strong> <span class="mono">${esc(id)}</span></div>`,
+        `<div><strong>Status:</strong> ${esc(status)}</div>`,
+        `<div><strong>Created:</strong> ${esc(formatDateTime(row.created_at))}</div>`,
+        `<div><strong>Validated:</strong> ${esc(validatedAt)}</div>`,
+        `<div><strong>Created by:</strong> ${esc(createdBy)}</div>`,
+        `<div><strong>Size:</strong> ${esc(bytesToText(row.size_bytes))}</div>`,
+        `<div><strong>Offsite synced:</strong> ${esc(offsite)}</div>`,
+        `<div><strong>Storage path:</strong> <span class="mono">${esc(storagePath)}</span></div>`,
+      ].join("");
+      const dryRunReady = lastDryRunBackupId === id;
+      guardEl.innerHTML = dryRunReady
+        ? `Safety guard: dry-run completed for <span class="mono">${esc(id)}</span>. You can run restore apply.`
+        : `Safety guard: run <strong>Test restore</strong> for <span class="mono">${esc(id)}</span> before <strong>Run restore</strong>.`;
+      guardEl.style.color = dryRunReady ? "#8af6b6" : "#ffd183";
+    }
+
     function renderBackups(backups, policy, summary) {
       const rows = backups || [];
+      backupRowsById = Object.fromEntries(rows.map(row => [String(row.backup_id || ""), row]));
       const tbody = document.getElementById("backup-body");
       tbody.innerHTML = rows.length
         ? rows.map(row => `<tr>
@@ -779,8 +821,12 @@ DASHBOARD_HTML = """<!doctype html>
         : '<tr><td colspan="4" class="mini">No backups yet.</td></tr>';
 
       const select = document.getElementById("backup-select");
+      const previousSelection = select.value;
       const options = rows.map(row => `<option value="${esc(row.backup_id)}">${esc(row.backup_id)} (${esc(row.status)})</option>`).join("");
       select.innerHTML = options || '<option value="">No backup</option>';
+      if (previousSelection && backupRowsById[previousSelection]) {
+        select.value = previousSelection;
+      }
 
       document.getElementById("backup-count").textContent = String(toNum(summary?.count));
       document.getElementById("backup-size").textContent = bytesToText(summary?.total_size_bytes);
@@ -794,6 +840,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("backup-health").textContent = health;
       document.getElementById("backup-last-good").textContent = latestValidated;
       document.getElementById("backup-last-issue").textContent = latestIssue;
+      renderBackupSelectionDetails();
     }
 
     async function runBackupAction(action, method = "POST", body = null, button = null, taskLabel = "Task") {
@@ -915,6 +962,7 @@ DASHBOARD_HTML = """<!doctype html>
       await load();
     });
     document.getElementById("backup-refresh").addEventListener("click", loadBackupPanel);
+    document.getElementById("backup-select").addEventListener("change", renderBackupSelectionDetails);
     document.getElementById("backup-create").addEventListener("click", async () => {
       const btn = document.getElementById("backup-create");
       await runBackupAction("/superadmin/backups/create", "POST", null, btn, "Create backup");
@@ -944,16 +992,25 @@ DASHBOARD_HTML = """<!doctype html>
       const id = document.getElementById("backup-select").value;
       if (!id) return;
       const btn = document.getElementById("backup-dryrun");
-      await runBackupAction(`/superadmin/backups/${id}/restore?dry_run=true`, "POST", null, btn, "Test restore");
+      const result = await runBackupAction(`/superadmin/backups/${id}/restore?dry_run=true`, "POST", null, btn, "Test restore");
+      if (result && result.ok) {
+        lastDryRunBackupId = id;
+      }
       await loadBackupPanel();
     });
     document.getElementById("backup-apply").addEventListener("click", async () => {
       const id = document.getElementById("backup-select").value;
       if (!id) return;
+      if (lastDryRunBackupId !== id) {
+        setMsg("backup-msg", "err", "Run Test restore for this backup before apply.");
+        renderBackupSelectionDetails();
+        return;
+      }
+      const token = `RESTORE ${id}`;
       const ok = await openConfirmModal({
         title: "Confirm Restore Apply",
-        text: `This will run restore apply. Type backup id ${id} to continue.`,
-        expected: id,
+        text: `This will run restore apply. Type '${token}' to continue.`,
+        expected: token,
         confirmLabel: "Apply Restore",
       });
       if (!ok) {
