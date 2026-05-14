@@ -41,6 +41,22 @@ def request_ip(request: Request) -> str | None:
     return None
 
 
+def get_request_id(request: Request) -> str | None:
+    value = getattr(request.state, "request_id", None)
+    if value:
+        return str(value)
+    header_value = request.headers.get("x-request-id")
+    return header_value.strip() if header_value else None
+
+
+def with_request_context(request: Request, details: dict | None) -> dict:
+    payload = dict(details or {})
+    request_id = get_request_id(request)
+    if request_id:
+        payload["request_id"] = request_id
+    return payload
+
+
 def write_audit_log(
     db: Session,
     actor_username: str | None,
@@ -91,8 +107,7 @@ def audit_important_action(
         action=action,
         resource_type=resource_type,
         resource_id=resource_id,
-        details=details,
+        details=with_request_context(request, details),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
-

@@ -16,7 +16,7 @@ from aurora_core.services.models import BackupRecord, BackupStatus, Job, JobStat
 from aurora_core.services.plugin_store import PluginStore
 from aurora_core.services.queue import QueueAdapter
 from aurora_core.utils.timeutils import utc_now_naive
-from aurora_core.services.web_auth import request_ip, require_superadmin_session, write_audit_log
+from aurora_core.services.web_auth import request_ip, require_superadmin_session, with_request_context, write_audit_log
 
 router = APIRouter()
 
@@ -51,7 +51,7 @@ async def superadmin_create_user(request: Request) -> dict:
         action="user.create",
         resource_type="user",
         resource_id=username,
-        details={"role": role},
+        details=with_request_context(request, {"role": role}),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -141,7 +141,7 @@ def superadmin_debug_enqueue_random(request: Request) -> dict:
         action="debug.job.enqueue_random",
         resource_type="job",
         resource_id=job_id,
-        details={"mode": mode},
+        details=with_request_context(request, {"mode": mode}),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -223,12 +223,12 @@ def superadmin_backup_create(request: Request) -> dict:
         action="backup.create",
         resource_type="backup",
         resource_id=result["backup_id"],
-        details={
+        details=with_request_context(request, {
             "size_bytes": result["size_bytes"],
             "status": result.get("status"),
             "valid": bool(validation.get("valid")) if validation else None,
             "offsite_synced": bool((result.get("offsite") or {}).get("synced")),
-        },
+        }),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -256,7 +256,7 @@ def superadmin_backup_validate(request: Request, backup_id: str) -> dict:
         action="backup.validate",
         resource_type="backup",
         resource_id=backup_id,
-        details={"valid": result.get("valid"), "issues": result.get("issues", [])},
+        details=with_request_context(request, {"valid": result.get("valid"), "issues": result.get("issues", [])}),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -275,7 +275,7 @@ def superadmin_backup_prune(request: Request) -> dict:
         action="backup.prune",
         resource_type="backup",
         resource_id="policy",
-        details=result,
+        details=with_request_context(request, result),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -339,7 +339,7 @@ def superadmin_backup_offsite_sync(request: Request, backup_id: str) -> dict:
         action="backup.offsite_sync",
         resource_type="backup",
         resource_id=backup_id,
-        details=result,
+        details=with_request_context(request, result),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -401,11 +401,11 @@ async def superadmin_backup_restore(request: Request, backup_id: str, dry_run: b
         action="backup.restore.dry_run" if dry_run else "backup.restore",
         resource_type="backup",
         resource_id=backup_id,
-        details={
+        details=with_request_context(request, {
             "dry_run": dry_run,
             "ok": result.get("ok"),
             "message": result.get("message"),
-        },
+        }),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -418,4 +418,3 @@ def _new_job_id() -> str:
     ts = utc_now_naive().strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(2).upper()
     return f"JOB_{ts}_{suffix}"
-

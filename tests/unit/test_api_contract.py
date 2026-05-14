@@ -165,3 +165,17 @@ def test_dashboard_overview_payload(client):
     assert "agents" in data
     assert "jobs" in data
     assert "executions" in data
+
+
+def test_request_id_echo_when_header_provided(client):
+    response = client.get("/health", headers={"X-Request-Id": "req-test-123"})
+    assert response.status_code == 200
+    assert response.headers.get("X-Request-Id") == "req-test-123"
+
+
+def test_request_id_generated_when_missing(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    request_id = response.headers.get("X-Request-Id")
+    assert request_id
+    assert request_id.startswith("req_")

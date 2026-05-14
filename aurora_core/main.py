@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -53,6 +55,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.backup_scheduler = BackupScheduler(effective_settings, app.state.backup_service, app.state.session_factory)
     app.state.dashboard_sessions = {}
     app.state.dashboard_session_ttl_seconds = 60 * 60 * 8
+
+    @app.middleware("http")
+    async def request_context_middleware(request, call_next):
+        request_id = (request.headers.get("x-request-id") or "").strip() or f"req_{secrets.token_hex(8)}"
+        request.state.request_id = request_id
+        started = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        response.headers["X-Request-Id"] = request_id
+        logger.info(
+            "http.request method=%s path=%s status=%s duration_ms=%s request_id=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+            request_id,
+        )
+        return response
 
     @app.get("/health")
     def health() -> dict:

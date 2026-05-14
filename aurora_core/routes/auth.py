@@ -11,7 +11,7 @@ from aurora_core.utils.auth_utils import verify_password
 from aurora_core.services.dashboard_html import DASHBOARD_HTML, LOGIN_HTML
 from aurora_core.services.models import User, UserRole
 from aurora_core.utils.timeutils import utc_now_naive
-from aurora_core.services.web_auth import get_dashboard_user, request_ip, write_audit_log
+from aurora_core.services.web_auth import get_dashboard_user, request_ip, with_request_context, write_audit_log
 
 
 router = APIRouter()
@@ -62,7 +62,7 @@ async def login_submit(request: Request) -> JSONResponse:
         action="auth.login",
         resource_type="session",
         resource_id=session_id[:12],
-        details={"message": "dashboard login success"},
+        details=with_request_context(request, {"message": "dashboard login success"}),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -92,7 +92,7 @@ def dashboard_logout(request: Request) -> JSONResponse:
             action="auth.logout",
             resource_type="session",
             resource_id=(session_id or "")[:12],
-            details={},
+            details=with_request_context(request, {}),
             ip_address=request_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
@@ -112,4 +112,3 @@ def dashboard_auth_status(request: Request) -> dict:
         "role": actor["role"],
         "is_superadmin": actor["role"] == UserRole.superadmin.value,
     }
-
