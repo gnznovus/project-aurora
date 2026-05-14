@@ -281,7 +281,10 @@ def test_backup_restore_apply_requires_confirmation(client):
     assert created.status_code == 200
     backup_id = created.json()["backup_id"]
 
-    response = client.post(f"/superadmin/backups/{backup_id}/restore?dry_run=false")
+    response = client.post(
+        f"/superadmin/backups/{backup_id}/restore?dry_run=false",
+        json={"confirm": "wrong-token"},
+    )
     assert response.status_code == 400
     assert "confirmation required" in response.json()["detail"]
 

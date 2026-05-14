@@ -208,6 +208,35 @@ Apply restore (non-dry-run):
 .\scripts\restore_backup.ps1 -BackupId bkp_xxx -Apply
 ```
 
+### Restore Runbook (Operator)
+
+1. Validate backup first:
+
+```powershell
+.\scripts\restore_backup.ps1 -BackupId bkp_xxx
+```
+
+2. Run API dry-run from dashboard (`Test restore`) or endpoint:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/superadmin/backups/bkp_xxx/restore?dry_run=true" \
+  -H "X-Admin-Token: aurora-admin-token"
+```
+
+3. Confirm apply (requires explicit confirmation token equal to backup id):
+
+```bash
+curl -X POST "http://127.0.0.1:8000/superadmin/backups/bkp_xxx/restore?dry_run=false" \
+  -H "X-Admin-Token: aurora-admin-token" \
+  -H "Content-Type: application/json" \
+  -d '{"confirm":"bkp_xxx"}'
+```
+
+4. Post-restore checks:
+- Open dashboard and verify agent/task counters load normally.
+- Verify latest backup summary and audit log entries are present.
+- Run a smoke task (`/superadmin/debug/enqueue-random`) and confirm completion.
+
 ### 3. Open Dashboard
 
 - `http://127.0.0.1:8000/login`
