@@ -119,14 +119,35 @@ def _validate_startup_security(settings: Settings) -> None:
     if env in {"dev", "local", "test"}:
         return
 
-    using_default_superadmin = (
-        settings.superadmin_username.strip() == "superadmin"
-        and settings.superadmin_password.strip() == "superadmin"
-    )
-    if using_default_superadmin:
+    errors: list[str] = []
+    username = settings.superadmin_username.strip()
+    password = settings.superadmin_password.strip()
+    admin_token = settings.admin_token.strip()
+    bootstrap_token = settings.bootstrap_token.strip()
+
+    if username == "superadmin" and password == "superadmin":
+        errors.append(
+            "default superadmin credentials detected (set AURORA_SUPERADMIN_USERNAME and AURORA_SUPERADMIN_PASSWORD)"
+        )
+
+    if admin_token == "aurora-admin-token":
+        errors.append("default admin token detected (set AURORA_ADMIN_TOKEN)")
+
+    if bootstrap_token == "aurora-bootstrap-token":
+        errors.append("default bootstrap token detected (set AURORA_BOOTSTRAP_TOKEN)")
+
+    if len(password) < 12:
+        errors.append("superadmin password must be at least 12 characters in production")
+
+    if len(admin_token) < 20:
+        errors.append("admin token must be at least 20 characters in production")
+
+    if len(bootstrap_token) < 20:
+        errors.append("bootstrap token must be at least 20 characters in production")
+
+    if errors:
         raise RuntimeError(
-            "unsafe production configuration: default superadmin credentials detected. "
-            "Set AURORA_SUPERADMIN_USERNAME and AURORA_SUPERADMIN_PASSWORD."
+            "unsafe production configuration: " + "; ".join(errors)
         )
 
 

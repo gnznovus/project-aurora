@@ -45,7 +45,7 @@ from aurora_core.services.schemas import (
 )
 from aurora_core.services.security import get_db, new_agent_id, new_api_key, require_admin_token, require_agent_auth
 from aurora_core.utils.timeutils import utc_now_naive
-from aurora_core.services.web_auth import audit_important_action
+from aurora_core.services.web_auth import audit_important_action, get_request_id
 
 logger = logging.getLogger("aurora-core")
 router = APIRouter()
@@ -59,6 +59,7 @@ def register_plugin(
     _: Annotated[None, Depends(require_admin_token)],
 ) -> RegisterPluginResponse:
     ensure_not_maintenance_mode(request, "plugin.register")
+    request_id = get_request_id(request)
     store: PluginStore = request.app.state.plugin_store
     try:
         digest = store.digest_file(payload.filename)
@@ -80,7 +81,13 @@ def register_plugin(
         )
     )
     if existing:
-        logger.info("plugin.register.existing name=%s version=%s digest=%s", payload.name, existing.version, existing.digest)
+        logger.info(
+            "plugin.register.existing request_id=%s name=%s version=%s digest=%s",
+            request_id,
+            payload.name,
+            existing.version,
+            existing.digest,
+        )
         return RegisterPluginResponse(name=payload.name, version=existing.version, digest=existing.digest)
 
     plugin_version = PluginVersion(
@@ -93,7 +100,13 @@ def register_plugin(
     )
     db.add(plugin_version)
     db.commit()
-    logger.info("plugin.registered name=%s version=%s digest=%s", payload.name, payload.version, digest)
+    logger.info(
+        "plugin.registered request_id=%s name=%s version=%s digest=%s",
+        request_id,
+        payload.name,
+        payload.version,
+        digest,
+    )
     audit_important_action(
         request=request,
         db_factory=request.app.state.session_factory,
@@ -113,6 +126,7 @@ def enqueue_job(
     _: Annotated[None, Depends(require_admin_token)],
 ) -> EnqueueJobResponse:
     ensure_not_maintenance_mode(request, "job.enqueue")
+    request_id = get_request_id(request)
     queue: QueueAdapter = request.app.state.queue
     plugin = db.scalar(select(Plugin).where(Plugin.name == payload.plugin_name))
     if not plugin:
@@ -145,7 +159,8 @@ def enqueue_job(
     db.commit()
     queue.enqueue(job.id)
     logger.info(
-        "job.enqueued job_id=%s plugin=%s version=%s required_tags=%s max_attempts=%s backoff=%ss",
+        "job.enqueued request_id=%s job_id=%s plugin=%s version=%s required_tags=%s max_attempts=%s backoff=%ss",
+        request_id,
         job.id,
         payload.plugin_name,
         plugin_version.version,
@@ -171,6 +186,7 @@ def enqueue_job(
 @router.post("/agents/register", response_model=RegisterAgentResponse)
 def register_agent(payload: RegisterAgentRequest, request: Request, db: Annotated[Session, Depends(get_db)]) -> RegisterAgentResponse:
     ensure_not_maintenance_mode(request, "agent.register")
+    request_id = get_request_id(request)
     settings_obj: Settings = request.app.state.settings
     if payload.bootstrap_token != settings_obj.bootstrap_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid bootstrap token")
@@ -188,7 +204,8 @@ def register_agent(payload: RegisterAgentRequest, request: Request, db: Annotate
     db.add(agent)
     db.commit()
     logger.info(
-        "agent.registered agent_id=%s name=%s tags=%s max_concurrency=%s",
+        "agent.registered request_id=%s agent_id=%s name=%s tags=%s max_concurrency=%s",
+        request_id,
         agent.id,
         agent.name,
         agent.tags,
@@ -210,6 +227,7 @@ def heartbeat(
     agent: Annotated[Agent, Depends(require_agent_auth)],
 ) -> AgentInfo:
     ensure_not_maintenance_mode(request, "agent.heartbeat")
+    request_id = get_request_id(request)
     cpu_load = payload.cpu_load_pct
     ram_load = payload.ram_load_pct
     capacity_hint = payload.capacity_hint or agent.max_concurrency
@@ -226,7 +244,13 @@ def heartbeat(
     )
     db.commit()
     db.refresh(agent)
-    logger.debug("agent.heartbeat agent_id=%s active_leases=%s max_concurrency=%s", agent.id, agent.active_leases, agent.max_concurrency)
+    logger.debug(
+        "agent.heartbeat request_id=%s agent_id=%s active_leases=%s max_concurrency=%s",
+        request_id,
+        agent.id,
+        agent.active_leases,
+        agent.max_concurrency,
+    )
     return AgentInfo(
         agent_id=agent.id,
         tags=agent.tags,
@@ -245,10 +269,11 @@ def next_job(
     agent: Annotated[Agent, Depends(require_agent_auth)],
 ) -> NextJobResponse:
     ensure_not_maintenance_mode(request, "job.lease")
+    request_id = get_request_id(request)
     settings_obj: Settings = request.app.state.settings
     strategy: DefaultStaticRoutingStrategy = request.app.state.router_strategy
     queue: QueueAdapter = request.app.state.queue
-    _recover_stale_leases(db, queue)
+    _recover_stale_leases(db, queue, request_id=request_id)
 
     agent.last_heartbeat_at = utc_now_naive()
     db.flush()
@@ -284,7 +309,7 @@ def next_job(
 
     if lease_job is None:
         db.commit()
-        logger.debug("job.lease.none agent_id=%s", agent.id)
+        logger.debug("job.lease.none request_id=%s agent_id=%s", request_id, agent.id)
         return NextJobResponse(lease=None)
 
     updated = db.execute(
@@ -298,7 +323,7 @@ def next_job(
     )
     if updated.rowcount != 1:
         db.commit()
-        logger.info("job.lease.race_lost agent_id=%s job_id=%s", agent.id, lease_job.id)
+        logger.info("job.lease.race_lost request_id=%s agent_id=%s job_id=%s", request_id, agent.id, lease_job.id)
         return NextJobResponse(lease=None)
 
     execution_id = f"exe_{uuid.uuid4().hex[:16]}"
@@ -333,7 +358,8 @@ def next_job(
         resume_checkpoint=_latest_checkpoint_for_job(db, job.id),
     )
     logger.info(
-        "job.leased agent_id=%s job_id=%s execution_id=%s plugin=%s version=%s",
+        "job.leased request_id=%s agent_id=%s job_id=%s execution_id=%s plugin=%s version=%s",
+        request_id,
         agent.id,
         job.id,
         execution.id,
@@ -345,6 +371,7 @@ def next_job(
 
 @router.get("/plugins/{name}/manifest", response_model=PluginManifest)
 def plugin_manifest(name: str, request: Request, version: str | None = None, db: Session = Depends(get_db)):
+    request_id = get_request_id(request)
     plugin = db.scalar(select(Plugin).where(Plugin.name == name))
     if not plugin:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="plugin not found")
@@ -359,7 +386,12 @@ def plugin_manifest(name: str, request: Request, version: str | None = None, db:
         )
     if not plugin_version:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="plugin version not found")
-    logger.info("plugin.manifest.requested name=%s version=%s", plugin.name, plugin_version.version)
+    logger.info(
+        "plugin.manifest.requested request_id=%s name=%s version=%s",
+        request_id,
+        plugin.name,
+        plugin_version.version,
+    )
 
     return PluginManifest(
         name=plugin.name,
@@ -373,6 +405,7 @@ def plugin_manifest(name: str, request: Request, version: str | None = None, db:
 
 @router.get("/plugins/{name}/download")
 def download_plugin(name: str, request: Request, version: str | None = None, db: Session = Depends(get_db)):
+    request_id = get_request_id(request)
     store: PluginStore = request.app.state.plugin_store
     plugin = db.scalar(select(Plugin).where(Plugin.name == name))
     if not plugin:
@@ -390,7 +423,12 @@ def download_plugin(name: str, request: Request, version: str | None = None, db:
     file_path = store.resolve(plugin_version.filename)
     if not file_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="plugin artifact missing")
-    logger.info("plugin.download.requested name=%s version=%s", plugin.name, plugin_version.version)
+    logger.info(
+        "plugin.download.requested request_id=%s name=%s version=%s",
+        request_id,
+        plugin.name,
+        plugin_version.version,
+    )
     return FileResponse(path=file_path, filename=file_path.name, media_type="application/octet-stream")
 
 
@@ -403,6 +441,7 @@ def execution_result(
     agent: Agent = Depends(require_agent_auth),
 ) -> dict:
     ensure_not_maintenance_mode(request, "execution.result")
+    request_id = get_request_id(request)
     execution = db.scalar(select(Execution).where(Execution.id == execution_id))
     if not execution:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="execution not found")
@@ -436,7 +475,8 @@ def execution_result(
             queue: QueueAdapter = request.app.state.queue
             queue.enqueue(job.id)
             logger.info(
-                "job.retry_scheduled job_id=%s execution_id=%s attempt=%s/%s backoff=%ss",
+                "job.retry_scheduled request_id=%s job_id=%s execution_id=%s attempt=%s/%s backoff=%ss",
+                request_id,
                 job.id,
                 execution.id,
                 job.attempt_count,
@@ -448,7 +488,8 @@ def execution_result(
             job.completed_at = utc_now_naive()
             job.next_retry_at = None
             logger.info(
-                "job.failed_terminal job_id=%s execution_id=%s attempt=%s/%s",
+                "job.failed_terminal request_id=%s job_id=%s execution_id=%s attempt=%s/%s",
+                request_id,
                 job.id,
                 execution.id,
                 job.attempt_count,
@@ -460,7 +501,8 @@ def execution_result(
 
     db.commit()
     logger.info(
-        "execution.result.recorded execution_id=%s job_id=%s status=%s exit_code=%s",
+        "execution.result.recorded request_id=%s execution_id=%s job_id=%s status=%s exit_code=%s",
+        request_id,
         execution.id,
         job.id,
         normalized.value,
@@ -478,6 +520,7 @@ def upsert_checkpoint(
     agent: Agent = Depends(require_agent_auth),
 ) -> ExecutionCheckpointResponse:
     ensure_not_maintenance_mode(request, "execution.checkpoint")
+    request_id = get_request_id(request)
     execution = db.scalar(select(Execution).where(Execution.id == execution_id))
     if not execution:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="execution not found")
@@ -487,6 +530,12 @@ def upsert_checkpoint(
     db.add(checkpoint)
     db.commit()
     db.refresh(checkpoint)
+    logger.info(
+        "execution.checkpoint.persisted request_id=%s execution_id=%s checkpoint_id=%s status=ok",
+        request_id,
+        execution.id,
+        checkpoint.id,
+    )
     return ExecutionCheckpointResponse(
         execution_id=execution.id,
         checkpoint_payload=checkpoint.payload,
@@ -555,7 +604,7 @@ def _friendly_agent_name(raw_name: str) -> str:
     return f"{secrets.choice(adjectives)} {secrets.choice(nouns)} {secrets.randbelow(90) + 10}"
 
 
-def _recover_stale_leases(db: Session, queue: QueueAdapter) -> None:
+def _recover_stale_leases(db: Session, queue: QueueAdapter, request_id: str | None = None) -> None:
     now = utc_now_naive()
     stale_executions = list(
         db.scalars(
@@ -577,7 +626,8 @@ def _recover_stale_leases(db: Session, queue: QueueAdapter) -> None:
                 job.next_retry_at = now + timedelta(seconds=job.retry_backoff_seconds)
                 queue.enqueue(job.id)
                 logger.info(
-                    "job.recovered_for_retry job_id=%s execution_id=%s attempt=%s/%s",
+                    "job.recovered_for_retry request_id=%s job_id=%s execution_id=%s attempt=%s/%s",
+                    request_id,
                     job.id,
                     execution.id,
                     job.attempt_count,
@@ -587,11 +637,15 @@ def _recover_stale_leases(db: Session, queue: QueueAdapter) -> None:
                 job.status = JobStatus.failed
                 job.completed_at = now
                 job.next_retry_at = None
-                logger.info("job.recovered_terminal_failure job_id=%s execution_id=%s", job.id, execution.id)
+                logger.info(
+                    "job.recovered_terminal_failure request_id=%s job_id=%s execution_id=%s",
+                    request_id,
+                    job.id,
+                    execution.id,
+                )
 
         agent = db.scalar(select(Agent).where(Agent.id == execution.agent_id))
         if agent and agent.active_leases > 0:
             agent.active_leases -= 1
 
     db.commit()
-

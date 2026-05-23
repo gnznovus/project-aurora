@@ -246,6 +246,8 @@ curl -X POST "http://127.0.0.1:8000/superadmin/backups/bkp_xxx/restore?dry_run=f
 
 Set production credentials with environment variables:
 
+- `AURORA_ADMIN_TOKEN`
+- `AURORA_BOOTSTRAP_TOKEN`
 - `AURORA_SUPERADMIN_USERNAME`
 - `AURORA_SUPERADMIN_PASSWORD`
 - `AURORA_BACKUP_DIR`
@@ -262,6 +264,16 @@ Set production credentials with environment variables:
 - `AURORA_BACKUP_VALIDATE_AFTER_CREATE`
 - `AURORA_BACKUP_PRUNE_MIN_KEEP_COUNT`
 - `AURORA_SCHEMA_AUTO_REPAIR_ON_STARTUP` (default `true`)
+
+Production startup security checks:
+
+- `AURORA_SUPERADMIN_USERNAME` / `AURORA_SUPERADMIN_PASSWORD` must not be default `superadmin/superadmin`
+- `AURORA_ADMIN_TOKEN` must not be default `aurora-admin-token`
+- `AURORA_BOOTSTRAP_TOKEN` must not be default `aurora-bootstrap-token`
+- minimum lengths in production:
+  - superadmin password: at least 12 characters
+  - admin token: at least 20 characters
+  - bootstrap token: at least 20 characters
 
 ### 4. Demo One End-to-End Job
 

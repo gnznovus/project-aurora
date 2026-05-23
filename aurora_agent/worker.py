@@ -42,7 +42,8 @@ class AgentWorker:
 
     def run_once(self) -> None:
         self.ensure_registered()
-        logger.debug("agent.step heartbeat")
+        agent_id = self.client.credentials.agent_id if self.client.credentials else "unknown"
+        logger.debug("agent.step heartbeat agent_id=%s", agent_id)
         cpu_load, ram_load = self._resource_metrics()
         self.client.heartbeat(
             running_jobs=0,
@@ -50,14 +51,15 @@ class AgentWorker:
             cpu_load_pct=cpu_load,
             ram_load_pct=ram_load,
         )
-        logger.debug("agent.step request_next_job")
+        logger.debug("agent.step request_next_job agent_id=%s", agent_id)
         response = self.client.next_job()
         lease = response.get("lease")
         if not lease:
-            logger.debug("agent.step no_job")
+            logger.debug("agent.step no_job agent_id=%s", agent_id)
             return
         logger.info(
-            "agent.step lease_received execution_id=%s job_id=%s plugin=%s version=%s",
+            "agent.step lease_received agent_id=%s execution_id=%s job_id=%s plugin=%s version=%s",
+            agent_id,
             lease["execution_id"],
             lease["job_id"],
             lease["plugin_name"],
@@ -66,15 +68,35 @@ class AgentWorker:
         manifest = self.client.plugin_manifest(lease["plugin_name"], lease["plugin_version"])
         digest = manifest["digest"]
         if not self.cache.has(lease["plugin_name"], digest):
-            logger.info("agent.step plugin_download name=%s digest=%s", lease["plugin_name"], digest[:12])
+            logger.info(
+                "agent.step plugin_download agent_id=%s job_id=%s execution_id=%s name=%s digest=%s",
+                agent_id,
+                lease["job_id"],
+                lease["execution_id"],
+                lease["plugin_name"],
+                digest[:12],
+            )
             artifact = self.client.download_plugin(manifest["download_url"])
             self.cache.save(lease["plugin_name"], digest, artifact)
         else:
-            logger.info("agent.step plugin_cache_hit name=%s digest=%s", lease["plugin_name"], digest[:12])
+            logger.info(
+                "agent.step plugin_cache_hit agent_id=%s job_id=%s execution_id=%s name=%s digest=%s",
+                agent_id,
+                lease["job_id"],
+                lease["execution_id"],
+                lease["plugin_name"],
+                digest[:12],
+            )
         plugin_path = self.cache.get_path(lease["plugin_name"], digest)
         checkpoint_path = self._checkpoint_path(lease["execution_id"])
         resume_checkpoint = lease.get("resume_checkpoint")
-        logger.info("agent.step execute execution_id=%s timeout=%s", lease["execution_id"], manifest["timeout_seconds"])
+        logger.info(
+            "agent.step execute agent_id=%s execution_id=%s job_id=%s timeout=%s",
+            agent_id,
+            lease["execution_id"],
+            lease["job_id"],
+            manifest["timeout_seconds"],
+        )
         result = execute_plugin(
             plugin_path,
             timeout_seconds=manifest["timeout_seconds"],
@@ -85,8 +107,10 @@ class AgentWorker:
         latest_checkpoint = self._read_checkpoint(checkpoint_path)
         if latest_checkpoint is not None:
             logger.info(
-                "agent.step checkpoint_upload execution_id=%s keys=%s",
+                "agent.step checkpoint_upload agent_id=%s execution_id=%s job_id=%s keys=%s",
+                agent_id,
                 lease["execution_id"],
+                lease["job_id"],
                 sorted(latest_checkpoint.keys()),
             )
             self.client.upsert_checkpoint(lease["execution_id"], latest_checkpoint)
@@ -94,8 +118,10 @@ class AgentWorker:
         else:
             result["metrics"]["checkpoint_uploaded"] = False
         logger.info(
-            "agent.step report_result execution_id=%s status=%s exit_code=%s",
+            "agent.step report_result agent_id=%s execution_id=%s job_id=%s status=%s exit_code=%s",
+            agent_id,
             lease["execution_id"],
+            lease["job_id"],
             result["status"],
             result["exit_code"],
         )
