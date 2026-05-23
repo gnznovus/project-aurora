@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import secrets
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -19,6 +20,34 @@ from aurora_core.utils.timeutils import utc_now_naive
 from aurora_core.services.web_auth import request_ip, require_superadmin_session, with_request_context, write_audit_log
 
 router = APIRouter()
+
+
+@router.post("/superadmin/confirmations")
+async def superadmin_issue_confirmation(request: Request) -> dict:
+    actor = require_superadmin_session(request)
+    payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    action = (payload.get("action") or "").strip()
+    backup_id = (payload.get("backup_id") or "").strip() if isinstance(payload, dict) else ""
+    if action not in {"backup.prune", "backup.restore.apply"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid confirmation action")
+    token = f"cfm_{secrets.token_hex(16)}"
+    now = utc_now_naive()
+    ttl = max(30, int(request.app.state.settings.destructive_action_token_ttl_seconds))
+    expires_at = now + timedelta(seconds=ttl)
+    request.app.state.confirmation_tokens[token] = {
+        "action": action,
+        "backup_id": backup_id or None,
+        "actor_username": actor["username"],
+        "expires_at": expires_at,
+        "used": False,
+    }
+    return {
+        "token": token,
+        "action": action,
+        "backup_id": backup_id or None,
+        "expires_at": expires_at.isoformat(),
+        "ttl_seconds": ttl,
+    }
 
 
 @router.post("/superadmin/users")
@@ -264,10 +293,20 @@ def superadmin_backup_validate(request: Request, backup_id: str) -> dict:
 
 
 @router.post("/superadmin/backups/prune")
-def superadmin_backup_prune(request: Request) -> dict:
+async def superadmin_backup_prune(request: Request) -> dict:
     actor = require_superadmin_session(request)
+    payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    confirm_token = (payload.get("confirm_token") or "").strip() if isinstance(payload, dict) else ""
+    _consume_confirmation_token(request, token=confirm_token, action="backup.prune", actor_username=actor["username"])
     service: BackupService = request.app.state.backup_service
+    before_rows = service.list_backups(limit=500)
+    before_non_pruned = sum(1 for row in before_rows if row.get("status") != BackupStatus.pruned.value)
     result = service.prune_backups()
+    after_rows = service.list_backups(limit=500)
+    after_non_pruned = sum(1 for row in after_rows if row.get("status") != BackupStatus.pruned.value)
+    audit_details = dict(result)
+    audit_details["before_non_pruned_count"] = before_non_pruned
+    audit_details["after_non_pruned_count"] = after_non_pruned
     write_audit_log(
         request.app.state.session_factory(),
         actor_username=actor["username"],
@@ -275,7 +314,7 @@ def superadmin_backup_prune(request: Request) -> dict:
         action="backup.prune",
         resource_type="backup",
         resource_id="policy",
-        details=with_request_context(request, result),
+        details=with_request_context(request, audit_details),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -370,11 +409,22 @@ async def superadmin_backup_restore(request: Request, backup_id: str, dry_run: b
     service: BackupService = request.app.state.backup_service
     payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     confirm = (payload.get("confirm") or "").strip() if isinstance(payload, dict) else ""
+    confirm_token = (payload.get("confirm_token") or "").strip() if isinstance(payload, dict) else ""
     if not dry_run and confirm != backup_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail='confirmation required: provide JSON body {"confirm":"<backup_id>"}',
         )
+    if not dry_run:
+        _consume_confirmation_token(
+            request,
+            token=confirm_token,
+            action="backup.restore.apply",
+            actor_username=actor["username"],
+            backup_id=backup_id,
+        )
+
+    before_summary = service.backup_summary()
 
     if dry_run:
         result = service.restore_backup(backup_id=backup_id, dry_run=True)
@@ -405,6 +455,10 @@ async def superadmin_backup_restore(request: Request, backup_id: str, dry_run: b
             "dry_run": dry_run,
             "ok": result.get("ok"),
             "message": result.get("message"),
+            "before_backup_count": before_summary.get("count"),
+            "before_latest_backup_id": (before_summary.get("latest") or {}).get("backup_id"),
+            "restore_total_rows": ((result.get("database_preview") or {}).get("total_rows")),
+            "restore_plugin_missing_count": ((result.get("plugins_restore") or {}).get("missing_files") and len((result.get("plugins_restore") or {}).get("missing_files"))) or ((result.get("plugins_preview") or {}).get("missing_count")),
         }),
         ip_address=request_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -418,3 +472,31 @@ def _new_job_id() -> str:
     ts = utc_now_naive().strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(2).upper()
     return f"JOB_{ts}_{suffix}"
+
+
+def _consume_confirmation_token(
+    request: Request,
+    *,
+    token: str,
+    action: str,
+    actor_username: str,
+    backup_id: str | None = None,
+) -> None:
+    if not token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirm_token is required")
+    row = request.app.state.confirmation_tokens.get(token)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid confirmation token")
+    if row.get("used"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirmation token already used")
+    if row.get("action") != action:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirmation token action mismatch")
+    if row.get("actor_username") != actor_username:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="confirmation token actor mismatch")
+    expires_at = row.get("expires_at")
+    if not expires_at or expires_at <= utc_now_naive():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirmation token expired")
+    token_backup_id = row.get("backup_id")
+    if backup_id and token_backup_id and token_backup_id != backup_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirmation token backup mismatch")
+    row["used"] = True

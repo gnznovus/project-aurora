@@ -6,13 +6,14 @@ import uuid
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from aurora_core.config import Settings
 from aurora_core.services.maintenance import ensure_not_maintenance_mode
+from aurora_core.services.idempotency import canonical_payload_hash, lookup_record, store_record
 from aurora_core.services.models import (
     Agent,
     Execution,
@@ -57,9 +58,21 @@ def register_plugin(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[None, Depends(require_admin_token)],
+    x_idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> RegisterPluginResponse:
     ensure_not_maintenance_mode(request, "plugin.register")
     request_id = get_request_id(request)
+    idem_key = (x_idempotency_key or "").strip()
+    route_id = "POST:/plugins/register"
+    payload_hash = canonical_payload_hash(payload.model_dump())
+    if idem_key:
+        lookup = lookup_record(db, route=route_id, idem_key=idem_key, payload_hash=payload_hash)
+        if lookup.conflict:
+            logger.info("idempotency.conflict request_id=%s route=%s key=%s", request_id, route_id, idem_key)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="idempotency key reused with different payload")
+        if lookup.replay:
+            logger.info("idempotency.replay request_id=%s route=%s key=%s", request_id, route_id, idem_key)
+            return RegisterPluginResponse(**(lookup.response_json or {}))
     store: PluginStore = request.app.state.plugin_store
     try:
         digest = store.digest_file(payload.filename)
@@ -115,7 +128,18 @@ def register_plugin(
         resource_id=f"{payload.name}:{payload.version}",
         details={"filename": payload.filename},
     )
-    return RegisterPluginResponse(name=payload.name, version=payload.version, digest=digest)
+    response_payload = RegisterPluginResponse(name=payload.name, version=payload.version, digest=digest)
+    if idem_key:
+        store_record(
+            db,
+            route=route_id,
+            idem_key=idem_key,
+            payload_hash=payload_hash,
+            response_json=response_payload.model_dump(),
+            status_code=200,
+            ttl_seconds=request.app.state.settings.idempotency_ttl_seconds,
+        )
+    return response_payload
 
 
 @router.post("/jobs", response_model=EnqueueJobResponse)
@@ -124,9 +148,21 @@ def enqueue_job(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[None, Depends(require_admin_token)],
+    x_idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> EnqueueJobResponse:
     ensure_not_maintenance_mode(request, "job.enqueue")
     request_id = get_request_id(request)
+    idem_key = (x_idempotency_key or "").strip()
+    route_id = "POST:/jobs"
+    payload_hash = canonical_payload_hash(payload.model_dump())
+    if idem_key:
+        lookup = lookup_record(db, route=route_id, idem_key=idem_key, payload_hash=payload_hash)
+        if lookup.conflict:
+            logger.info("idempotency.conflict request_id=%s route=%s key=%s", request_id, route_id, idem_key)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="idempotency key reused with different payload")
+        if lookup.replay:
+            logger.info("idempotency.replay request_id=%s route=%s key=%s", request_id, route_id, idem_key)
+            return EnqueueJobResponse(**(lookup.response_json or {}))
     queue: QueueAdapter = request.app.state.queue
     plugin = db.scalar(select(Plugin).where(Plugin.name == payload.plugin_name))
     if not plugin:
@@ -180,7 +216,18 @@ def enqueue_job(
             "max_attempts": job.max_attempts,
         },
     )
-    return EnqueueJobResponse(job_id=job.id, status=job.status.value)
+    response_payload = EnqueueJobResponse(job_id=job.id, status=job.status.value)
+    if idem_key:
+        store_record(
+            db,
+            route=route_id,
+            idem_key=idem_key,
+            payload_hash=payload_hash,
+            response_json=response_payload.model_dump(),
+            status_code=200,
+            ttl_seconds=request.app.state.settings.idempotency_ttl_seconds,
+        )
+    return response_payload
 
 
 @router.post("/agents/register", response_model=RegisterAgentResponse)
@@ -444,12 +491,27 @@ def execution_result(
     request_id = get_request_id(request)
     execution = db.scalar(select(Execution).where(Execution.id == execution_id))
     if not execution:
+        logger.info("execution.result.rejected request_id=%s execution_id=%s reason=execution_not_found", request_id, execution_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="execution not found")
     if execution.agent_id != agent.id:
+        logger.info(
+            "execution.result.rejected request_id=%s execution_id=%s agent_id=%s owner_agent_id=%s reason=ownership_mismatch",
+            request_id,
+            execution_id,
+            agent.id,
+            execution.agent_id,
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="execution owned by another agent")
     if execution.status != ExecutionStatus.leased:
+        logger.info(
+            "execution.result.rejected request_id=%s execution_id=%s status=%s reason=already_terminal",
+            request_id,
+            execution_id,
+            execution.status.value,
+        )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="execution is already terminal")
     if utc_now_naive() > execution.lease_expires_at:
+        logger.info("execution.result.rejected request_id=%s execution_id=%s reason=stale_lease", request_id, execution_id)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="stale lease")
 
     job = db.scalar(select(Job).where(Job.id == execution.job_id))
@@ -457,12 +519,53 @@ def execution_result(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
 
     normalized = payload.status
-    execution.status = normalized
-    execution.result_payload = payload.metrics
-    execution.stdout = payload.stdout
-    execution.stderr = payload.stderr
-    execution.exit_code = payload.exit_code
-    execution.completed_at = utc_now_naive()
+    completed_at = utc_now_naive()
+    updated = db.execute(
+        update(Execution)
+        .where(
+            and_(
+                Execution.id == execution_id,
+                Execution.agent_id == agent.id,
+                Execution.status == ExecutionStatus.leased,
+                Execution.lease_expires_at >= completed_at,
+            )
+        )
+        .values(
+            status=normalized,
+            result_payload=payload.metrics,
+            stdout=payload.stdout,
+            stderr=payload.stderr,
+            exit_code=payload.exit_code,
+            completed_at=completed_at,
+        )
+    )
+    if updated.rowcount != 1:
+        refreshed = db.scalar(select(Execution).where(Execution.id == execution_id))
+        if not refreshed:
+            logger.info("execution.result.rejected request_id=%s execution_id=%s reason=execution_not_found_after_race", request_id, execution_id)
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="execution not found")
+        if refreshed.agent_id != agent.id:
+            logger.info(
+                "execution.result.rejected request_id=%s execution_id=%s agent_id=%s owner_agent_id=%s reason=ownership_mismatch_after_race",
+                request_id,
+                execution_id,
+                agent.id,
+                refreshed.agent_id,
+            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="execution owned by another agent")
+        if completed_at > refreshed.lease_expires_at:
+            logger.info("execution.result.rejected request_id=%s execution_id=%s reason=stale_lease_after_race", request_id, execution_id)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="stale lease")
+        logger.info(
+            "execution.result.rejected request_id=%s execution_id=%s status=%s reason=already_terminal_after_race",
+            request_id,
+            execution_id,
+            refreshed.status.value,
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="execution is already terminal")
+    execution = db.scalar(select(Execution).where(Execution.id == execution_id))
+    if not execution:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="execution disappeared after update")
 
     if normalized == ExecutionStatus.completed:
         job.status = JobStatus.completed
@@ -498,6 +601,14 @@ def execution_result(
 
     if agent.active_leases > 0:
         agent.active_leases -= 1
+    elif agent.active_leases < 0:
+        logger.warning(
+            "agent.active_leases.corrected request_id=%s agent_id=%s active_leases=%s",
+            request_id,
+            agent.id,
+            agent.active_leases,
+        )
+        agent.active_leases = 0
 
     db.commit()
     logger.info(

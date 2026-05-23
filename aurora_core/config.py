@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     plugins_dir: Path = Path("plugins")
     agent_poll_seconds: int = 3
 
+    login_rate_limit_enabled: bool = False
+    login_rate_limit_max_attempts: int = 5
+    login_rate_limit_window_seconds: int = 60
+
+    token_rate_limit_enabled: bool = False
+    token_rate_limit_max_attempts: int = 120
+    token_rate_limit_window_seconds: int = 60
+
+    idempotency_ttl_seconds: int = 3600
+    destructive_action_token_ttl_seconds: int = 300
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

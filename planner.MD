@@ -15,7 +15,7 @@ Last updated: 2026-05-23
 - [x] Unit tests cover dashboard overview, startup schema guard, and lease/routing behavior.
 - [x] Smoke-like API lifecycle coverage exists (`tests/unit/test_api_contract.py`, `tests/unit/test_routing_and_leases.py`).
 - [x] CI gate for unit tests exists (`.github/workflows/unit-tests.yml`).
-- [x] Re-verify stability on current branch by running full unit suite now (`pytest tests/unit -q`) - passed (`39 passed in 10.02s`).
+- [x] Re-verify stability on current branch by running full unit suite now (`pytest tests/unit -q`) - passed (`41 passed in 9.98s`).
 
 Evidence:
 - `tests/unit/test_schema_guard.py`
@@ -63,6 +63,58 @@ Evidence:
 - `aurora_agent/worker.py`
 - `docs/observability_logging_standard.md`
 
+## Pre Nice-to-Have Hardening Sprint
+
+Target: 1 short sprint before feature expansion.
+
+### 1. Session and Auth Hardening
+- [x] Set dashboard session cookie `Secure` automatically outside `dev/local/test`.
+- [x] Add simple login rate limiting and lockout window for repeated failed `/login` attempts.
+- [x] Add token-auth rate limiting for sensitive write endpoints (`/jobs`, `/plugins/register`, `/superadmin/*`).
+- [x] Add unit tests for secure-cookie behavior and rate-limit responses.
+
+Done when:
+- [x] Non-dev deployments emit `Secure` session cookie.
+- [x] Repeated bad login attempts return controlled denial.
+
+### 2. Idempotency and Duplicate Suppression
+- [x] Add optional `Idempotency-Key` support for `POST /jobs`.
+- [x] Add optional `Idempotency-Key` support for `POST /plugins/register`.
+- [x] Persist idempotency records with TTL and deterministic response replay.
+- [x] Add tests for repeated requests with same key and divergent payload protection.
+
+Done when:
+- [x] Network retries cannot enqueue duplicate jobs for same idempotency key.
+- [x] Conflict is returned when same key is reused with different payload.
+
+### 3. Restore/Prune Operational Safety
+- [x] Add time-bound secondary confirmation token for destructive backup actions.
+- [x] Require confirmation token for prune and restore-apply endpoints.
+- [x] Expand audit details with before/after summary for restore and prune.
+- [x] Add tests for token expiry, invalid token, and happy path.
+
+Done when:
+- [x] Destructive actions require short-lived explicit confirmation.
+- [x] Audit logs capture actor, request_id, and impact summary.
+
+### 4. Lease/Retry Concurrency Correctness
+- [x] Add stress-style unit tests for stale-lease recovery race windows.
+- [x] Add tests for parallel `execution_result` submissions (duplicate terminalization prevention).
+- [x] Validate `active_leases` counters stay non-negative under contention.
+
+Done when:
+- [x] No double-finalization of same execution under concurrent requests.
+- [x] Retry/terminal transitions remain consistent under race conditions.
+
+### 5. Readiness and Health Depth
+- [x] Keep `/health` shallow and fast.
+- [x] Add `/health/ready` with DB, Redis/queue adapter, and migration-head checks.
+- [x] Add tests for degraded dependency behavior and readiness output schema.
+
+Done when:
+- [x] Operators can distinguish live vs ready states quickly.
+- [x] Readiness clearly pinpoints failing subsystem.
+
 ## Architecture Docs (Generated)
 
 - [x] `docs/generated/import_graph.md`
@@ -96,7 +148,7 @@ Evidence:
 
 ## Recommended Next Execution Order
 
-1. Re-verify all unit tests on current branch and lock baseline.
-2. Formalize logging/trace correlation standard.
+1. Complete Pre Nice-to-Have Hardening Sprint items 1 to 5.
+2. Re-run full unit suite and update hardening checklist statuses.
 3. Start dashboard drilldown track.
 4. Start routing strategy extensibility track.

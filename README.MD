@@ -101,6 +101,8 @@ sequenceDiagram
   - `GET /login`
   - `GET /dashboard`
   - `GET /dashboard/api/overview`
+  - `GET /health`
+  - `GET /health/ready`
 - Superadmin operations
   - `POST /superadmin/users`
   - `GET /superadmin/audit/logs`
@@ -109,7 +111,8 @@ sequenceDiagram
   - `POST /superadmin/backups/{id}/validate`
   - `POST /superadmin/backups/prune`
   - `POST /superadmin/backups/{id}/restore?dry_run=true`
-  - `POST /superadmin/backups/{id}/restore?dry_run=false` with confirmation body
+  - `POST /superadmin/backups/{id}/restore?dry_run=false` with confirmation body + confirmation token
+  - `POST /superadmin/confirmations` (issue short-lived confirmation token for destructive actions)
   - `POST /superadmin/backups/{id}/offsite-sync`
   - `GET /superadmin/backups/{id}/manifest/download`
   - `GET /superadmin/backups/policy`
@@ -122,9 +125,13 @@ sequenceDiagram
 - Agent API auth: `X-Agent-Id` + `X-Agent-Key`
 - Admin API auth: `X-Admin-Token`
 - Dashboard auth: `/login` session cookie
+- Dashboard cookie security: `Secure` is enabled automatically outside `dev/local/test`
 - RBAC roles: `operator`, `admin`, `superadmin`
 - Audit logging for important actions (auth, user creation, plugin/job operations)
 - During restore apply, Aurora enters maintenance mode and write endpoints return `503`.
+- Optional rate limiting (local-first):
+  - login attempts (`/login`)
+  - admin-token write endpoints (`X-Admin-Token` protected routes)
 
 ## Technology Stack
 
@@ -223,16 +230,25 @@ curl -X POST "http://127.0.0.1:8000/superadmin/backups/bkp_xxx/restore?dry_run=t
   -H "X-Admin-Token: aurora-admin-token"
 ```
 
-3. Confirm apply (requires explicit confirmation token equal to backup id):
+3. Issue a confirmation token for restore apply:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/superadmin/confirmations" \
+  -H "Content-Type: application/json" \
+  -b "aurora_dashboard_session=<session_cookie>" \
+  -d '{"action":"backup.restore.apply","backup_id":"bkp_xxx"}'
+```
+
+4. Confirm apply (requires backup id + short-lived confirmation token):
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/superadmin/backups/bkp_xxx/restore?dry_run=false" \
   -H "X-Admin-Token: aurora-admin-token" \
   -H "Content-Type: application/json" \
-  -d '{"confirm":"bkp_xxx"}'
+  -d '{"confirm":"bkp_xxx","confirm_token":"cfm_xxx"}'
 ```
 
-4. Post-restore checks:
+5. Post-restore checks:
 - Open dashboard and verify agent/task counters load normally.
 - Verify latest backup summary and audit log entries are present.
 - Run a smoke task (`/superadmin/debug/enqueue-random`) and confirm completion.
@@ -264,6 +280,14 @@ Set production credentials with environment variables:
 - `AURORA_BACKUP_VALIDATE_AFTER_CREATE`
 - `AURORA_BACKUP_PRUNE_MIN_KEEP_COUNT`
 - `AURORA_SCHEMA_AUTO_REPAIR_ON_STARTUP` (default `true`)
+- `AURORA_LOGIN_RATE_LIMIT_ENABLED` (default `false`)
+- `AURORA_LOGIN_RATE_LIMIT_MAX_ATTEMPTS`
+- `AURORA_LOGIN_RATE_LIMIT_WINDOW_SECONDS`
+- `AURORA_TOKEN_RATE_LIMIT_ENABLED` (default `false`)
+- `AURORA_TOKEN_RATE_LIMIT_MAX_ATTEMPTS`
+- `AURORA_TOKEN_RATE_LIMIT_WINDOW_SECONDS`
+- `AURORA_IDEMPOTENCY_TTL_SECONDS`
+- `AURORA_DESTRUCTIVE_ACTION_TOKEN_TTL_SECONDS`
 
 Production startup security checks:
 
@@ -291,11 +315,20 @@ Enqueue job:
 ```bash
 curl -X POST http://127.0.0.1:8000/jobs \
   -H "X-Admin-Token: aurora-admin-token" \
+  -H "Idempotency-Key: idem-job-001" \
   -H "Content-Type: application/json" \
   -d '{"plugin_name":"echo","plugin_version":"1.0.0","payload":{"message":"hello"},"required_tags":["default"]}'
 ```
 
 Watch live updates on dashboard cards, progression feed, agent status, and latest logs.
+
+Idempotency behavior:
+
+- `Idempotency-Key` is supported on:
+  - `POST /jobs`
+  - `POST /plugins/register`
+- Same key + same payload -> response replayed.
+- Same key + different payload -> `409 Conflict`.
 
 ## Checkpoint/Resume Contract
 
@@ -379,6 +412,16 @@ alembic history --verbose
 - Backup create now validates checksum immediately by default.
 - Offsite copy runs only after a valid backup.
 - Prune keeps a minimum recovery floor and avoids pruning the last validated backup.
+
+### Health and readiness
+
+- `GET /health` is shallow liveness.
+- `GET /health/ready` returns component readiness for:
+  - database
+  - queue adapter
+  - schema guard mode
+  - backup scheduler state
+- `503` is returned when one or more readiness components are degraded.
 
 ## Engineering Tradeoffs
 

@@ -5,9 +5,10 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from aurora_core.utils.auth_utils import hash_password
 from aurora_core.services.backup_scheduler import BackupScheduler
@@ -20,6 +21,7 @@ from aurora_core.services.models import (
 )
 from aurora_core.services.plugin_store import PluginStore
 from aurora_core.services.queue import InMemoryQueue, QueueAdapter, RedisQueue
+from aurora_core.services.rate_limit import LocalRateLimiter
 from aurora_core.routes.auth import router as auth_router
 from aurora_core.routes.dashboard import router as dashboard_router
 from aurora_core.routes.operations import router as operations_router
@@ -53,6 +55,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.plugin_store = PluginStore(Path(effective_settings.plugins_dir))
     app.state.backup_service = BackupService(effective_settings, app.state.session_factory)
     app.state.backup_scheduler = BackupScheduler(effective_settings, app.state.backup_service, app.state.session_factory)
+    app.state.rate_limiter = LocalRateLimiter()
+    app.state.confirmation_tokens = {}
     app.state.dashboard_sessions = {}
     app.state.dashboard_session_ttl_seconds = 60 * 60 * 8
 
@@ -77,6 +81,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok", "service": "aurora-core"}
+
+    @app.get("/health/ready")
+    def health_ready():
+        checks: dict[str, dict[str, Any]] = {}
+        degraded: list[str] = []
+
+        checks["database"] = _readiness_check_db(app)
+        if checks["database"]["ok"] is not True:
+            degraded.append("database")
+
+        checks["queue"] = _readiness_check_queue(app)
+        if checks["queue"]["ok"] is not True:
+            degraded.append("queue")
+
+        checks["schema_guard"] = _readiness_check_schema_guard(app)
+        if checks["schema_guard"]["ok"] is not True:
+            degraded.append("schema_guard")
+
+        checks["backup_scheduler"] = _readiness_check_scheduler(app)
+        if checks["backup_scheduler"]["ok"] is not True:
+            degraded.append("backup_scheduler")
+
+        ready = len(degraded) == 0
+        payload = {
+            "status": "ready" if ready else "degraded",
+            "service": "aurora-core",
+            "checks": checks,
+            "degraded_components": degraded,
+        }
+        if ready:
+            return payload
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=503, content=payload)
     app.include_router(auth_router)
     app.include_router(operations_router)
     app.include_router(superadmin_router)
@@ -152,3 +190,46 @@ def _validate_startup_security(settings: Settings) -> None:
 
 
 app = create_app()
+
+
+def _readiness_check_db(app: FastAPI) -> dict[str, Any]:
+    started = time.perf_counter()
+    db = app.state.session_factory()
+    try:
+        db.execute(text("SELECT 1"))
+        return {"ok": True, "latency_ms": int((time.perf_counter() - started) * 1000)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "latency_ms": int((time.perf_counter() - started) * 1000)}
+    finally:
+        db.close()
+
+
+def _readiness_check_queue(app: FastAPI) -> dict[str, Any]:
+    started = time.perf_counter()
+    queue = app.state.queue
+    try:
+        if isinstance(queue, InMemoryQueue):
+            return {"ok": True, "mode": "inmemory", "latency_ms": int((time.perf_counter() - started) * 1000)}
+        if isinstance(queue, RedisQueue):
+            queue._redis.ping()  # intentional direct ping for readiness only
+            return {"ok": True, "mode": "redis", "latency_ms": int((time.perf_counter() - started) * 1000)}
+        return {"ok": False, "error": "unknown queue adapter", "latency_ms": int((time.perf_counter() - started) * 1000)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "latency_ms": int((time.perf_counter() - started) * 1000)}
+
+
+def _readiness_check_schema_guard(app: FastAPI) -> dict[str, Any]:
+    settings_obj: Settings = app.state.settings
+    if settings_obj.database_url.startswith("sqlite"):
+        return {"ok": True, "mode": "sqlite-bootstrap"}
+    return {"ok": True, "mode": "startup-validated"}
+
+
+def _readiness_check_scheduler(app: FastAPI) -> dict[str, Any]:
+    scheduler = app.state.backup_scheduler
+    if not app.state.settings.backup_scheduler_enabled:
+        return {"ok": True, "enabled": False}
+    is_running = bool(getattr(scheduler, "_thread", None) and scheduler._thread.is_alive())
+    if not is_running:
+        return {"ok": False, "enabled": True, "error": "scheduler thread not running"}
+    return {"ok": True, "enabled": True}

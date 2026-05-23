@@ -8,6 +8,15 @@ def _login_superadmin(client) -> None:
     assert response.status_code == 200
 
 
+def _issue_confirmation(client, action: str, backup_id: str | None = None) -> str:
+    payload = {"action": action}
+    if backup_id:
+        payload["backup_id"] = backup_id
+    response = client.post("/superadmin/confirmations", json=payload)
+    assert response.status_code == 200
+    return response.json()["token"]
+
+
 def test_superadmin_backup_requires_auth(client):
     response = client.post("/superadmin/backups/create")
     assert response.status_code == 401
@@ -50,7 +59,8 @@ def test_backup_prune_prunes_old_backups(client):
     assert second.status_code == 200
     assert third.status_code == 200
 
-    prune_response = client.post("/superadmin/backups/prune")
+    token = _issue_confirmation(client, "backup.prune")
+    prune_response = client.post("/superadmin/backups/prune", json={"confirm_token": token})
     assert prune_response.status_code == 200
     payload = prune_response.json()
     assert payload["pruned_count"] >= 1
@@ -76,7 +86,8 @@ def test_backup_prune_keeps_at_least_one_validated_backup(client):
         response = client.post("/superadmin/backups/create")
         assert response.status_code == 200
 
-    prune_response = client.post("/superadmin/backups/prune")
+    token = _issue_confirmation(client, "backup.prune")
+    prune_response = client.post("/superadmin/backups/prune", json={"confirm_token": token})
     assert prune_response.status_code == 200
 
     rows = client.get("/superadmin/backups").json()["backups"]
@@ -135,7 +146,7 @@ def test_backup_restore_apply_reverts_state(client):
 
     response = client.post(
         f"/superadmin/backups/{backup_id}/restore?dry_run=false",
-        json={"confirm": backup_id},
+        json={"confirm": backup_id, "confirm_token": _issue_confirmation(client, "backup.restore.apply", backup_id=backup_id)},
     )
     assert response.status_code == 200
     body = response.json()
@@ -287,6 +298,36 @@ def test_backup_restore_apply_requires_confirmation(client):
     )
     assert response.status_code == 400
     assert "confirmation required" in response.json()["detail"]
+
+
+def test_backup_prune_requires_confirmation_token(client):
+    _login_superadmin(client)
+    response = client.post("/superadmin/backups/prune")
+    assert response.status_code == 400
+    assert "confirm_token is required" in response.json()["detail"]
+
+
+def test_backup_restore_apply_requires_confirmation_token(client):
+    _login_superadmin(client)
+    created = client.post("/superadmin/backups/create")
+    assert created.status_code == 200
+    backup_id = created.json()["backup_id"]
+    response = client.post(
+        f"/superadmin/backups/{backup_id}/restore?dry_run=false",
+        json={"confirm": backup_id},
+    )
+    assert response.status_code == 400
+    assert "confirm_token is required" in response.json()["detail"]
+
+
+def test_confirmation_token_expired(client):
+    _login_superadmin(client)
+    client.app.state.settings.destructive_action_token_ttl_seconds = 1
+    token = _issue_confirmation(client, "backup.prune")
+    client.app.state.confirmation_tokens[token]["expires_at"] = client.app.state.confirmation_tokens[token]["expires_at"].replace(year=2000)
+    response = client.post("/superadmin/backups/prune", json={"confirm_token": token})
+    assert response.status_code == 400
+    assert "expired" in response.json()["detail"]
 
 
 def test_debug_enqueue_random_requires_auth(client):

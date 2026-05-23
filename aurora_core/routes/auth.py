@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import select
 
 from aurora_core.utils.auth_utils import verify_password
+from aurora_core.config import Settings
 from aurora_core.services.dashboard_html import DASHBOARD_HTML, LOGIN_HTML
 from aurora_core.services.models import User, UserRole
 from aurora_core.utils.timeutils import utc_now_naive
@@ -37,6 +38,18 @@ async def login_submit(request: Request) -> JSONResponse:
     payload = await request.json()
     username = (payload.get("username") or "").strip()
     password = (payload.get("password") or "").strip()
+    settings_obj: Settings = request.app.state.settings
+    client_ip = request_ip(request) or "unknown"
+    limiter = request.app.state.rate_limiter
+    login_rl_key = f"login:{client_ip}:{username.lower()}"
+    if settings_obj.login_rate_limit_enabled:
+        allowed = limiter.check(
+            key=login_rl_key,
+            max_attempts=settings_obj.login_rate_limit_max_attempts,
+            window_seconds=settings_obj.login_rate_limit_window_seconds,
+        )
+        if not allowed:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="login rate limit exceeded")
     db = request.app.state.session_factory()
     try:
         user = db.scalar(select(User).where(User.username == username, User.is_active.is_(True)))
@@ -48,6 +61,7 @@ async def login_submit(request: Request) -> JSONResponse:
         actor_role = user.role
     finally:
         db.close()
+    limiter.reset(login_rl_key)
     session_id = secrets.token_urlsafe(32)
     expires_at = utc_now_naive() + timedelta(seconds=request.app.state.dashboard_session_ttl_seconds)
     request.app.state.dashboard_sessions[session_id] = {
@@ -72,7 +86,7 @@ async def login_submit(request: Request) -> JSONResponse:
         value=session_id,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=(settings_obj.deployment_env.strip().lower() not in {"dev", "local", "test"}),
         path="/",
     )
     return response

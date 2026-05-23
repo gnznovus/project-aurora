@@ -92,9 +92,9 @@ Required fields:
 - Terminal failures must include final `status` and terminal attempt index.
 
 ## Current Gaps (As of 2026-05-23)
-- Not all core log lines include `request_id` even though middleware provides it.
-- Agent logs do not currently include `request_id` (expected, since agent is not HTTP server); ensure `agent_id/job_id/execution_id` are always present for lifecycle actions.
-- Core checkpoint endpoint does not emit a dedicated checkpoint persisted event.
+- Most lifecycle-critical core logs now include `request_id`; continue enforcing this for new endpoints.
+- Agent logs intentionally do not include `request_id` (not an HTTP server); keep `agent_id/job_id/execution_id` mandatory for lifecycle actions.
+- Core checkpoint persistence event is implemented (`execution.checkpoint.persisted`); maintain parity for future checkpoint-related endpoints.
 
 ## Verification Checklist
 - [ ] For one successful job, traces can be reconstructed from enqueue -> lease -> execute -> result using `job_id` and `execution_id`.

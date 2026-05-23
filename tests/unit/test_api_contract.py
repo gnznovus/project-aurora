@@ -179,3 +179,32 @@ def test_request_id_generated_when_missing(client):
     request_id = response.headers.get("X-Request-Id")
     assert request_id
     assert request_id.startswith("req_")
+
+
+def test_health_ready_payload(client):
+    response = client.get("/health/ready")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["service"] == "aurora-core"
+    assert "checks" in body
+    assert body["checks"]["database"]["ok"] is True
+    assert body["checks"]["queue"]["ok"] is True
+    assert body["checks"]["schema_guard"]["ok"] is True
+    assert body["checks"]["backup_scheduler"]["ok"] is True
+
+
+def test_health_ready_degraded_when_db_unavailable(client):
+    class _BrokenSession:
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("db unavailable")
+
+        def close(self):
+            return None
+
+    client.app.state.session_factory = lambda: _BrokenSession()
+    response = client.get("/health/ready")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert "database" in body["degraded_components"]

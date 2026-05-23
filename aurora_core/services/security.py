@@ -25,6 +25,17 @@ def require_admin_token(
     x_admin_token: Annotated[str | None, Header(alias="X-Admin-Token")] = None,
 ) -> None:
     settings: Settings = request.app.state.settings
+    if settings.token_rate_limit_enabled:
+        limiter = request.app.state.rate_limiter
+        client = request.client.host if request.client else "unknown"
+        key = f"admin-token:{client}:{request.url.path}"
+        allowed = limiter.check(
+            key=key,
+            max_attempts=settings.token_rate_limit_max_attempts,
+            window_seconds=settings.token_rate_limit_window_seconds,
+        )
+        if not allowed:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="admin token rate limit exceeded")
     if x_admin_token != settings.admin_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid admin token")
 
@@ -50,4 +61,3 @@ def require_agent_auth(
     if not agent or agent.api_key != x_agent_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid agent credentials")
     return agent
-
