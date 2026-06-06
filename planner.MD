@@ -123,6 +123,43 @@ Done when:
 - [x] `docs/generated/dependency_rules.md`
 - [x] `docs/generated/db_relationships.md`
 - [x] `docs/generated/critical_execution_paths.md`
+- [x] `docs/generated/llm_execution_flow.md`
+
+## Aurora LLM Track
+
+### Prototype: Mock Provider
+- [x] Create LLM concept and plugin design docs.
+- [x] Create LLM execution flow documentation.
+- [ ] Define `knowledge/commands/` metadata examples.
+- [ ] Add `llm_plugin` mock provider implementation.
+- [ ] Add keyword/tag command retrieval.
+- [ ] Emit work-trace checkpoints.
+- [ ] Add tests for metadata parsing, retrieval, mock output, and trace shape.
+
+Done when:
+- [ ] LLM prototype runs with zero paid provider dependency.
+- [ ] Same plugin contract can later support `ollama_local`.
+- [ ] Work trace shows retrieval and answer-generation stages without exposing hidden reasoning.
+
+### Beta: Ollama Local Provider
+- [ ] Add `ollama_local` provider adapter.
+- [ ] Keep `mock` as default test provider.
+- [ ] Add provider timeout and local model config.
+- [ ] Add local usage/latency metadata where available.
+
+### Future: Runtime Command Execution
+- [ ] Add command metadata fields for executable commands (`executable`, `execution_kind`, `risk_level`, `requires_confirmation`, `required_role`).
+- [ ] Add `execution_policy` support: `suggest_only`, `plan_only`, `allowlisted_execute`.
+- [ ] Add plan-only validation for selected command, payload, role, and risk.
+- [ ] Add allowlisted execution path only after plan validation is tested.
+- [ ] Require confirmation token for destructive command execution.
+- [ ] Add audit logs for command plan, execution start, execution result, and rejection.
+- [ ] Add tests proving free-form generated commands cannot execute.
+
+Done when:
+- [ ] Prototype remains suggest-only.
+- [ ] Future execution is metadata-driven, allowlisted, role-checked, and audited.
+- [ ] Destructive execution cannot run without confirmation token.
 
 ## Nice to Have (Open)
 
