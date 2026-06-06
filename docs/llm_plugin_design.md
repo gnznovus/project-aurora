@@ -33,7 +33,8 @@ Fields:
 
 ## Command Metadata Format
 
-Command metadata should live under `knowledge/commands/`.
+Shared command metadata should live under `plugins/shared_assets/knowledge/cmd/`.
+Plugin-local LLM knowledge should live under `plugins/LLM/knowledge/cmd/`.
 
 Suggested file shape:
 

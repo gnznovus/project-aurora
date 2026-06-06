@@ -130,20 +130,21 @@ Done when:
 ### Prototype: Mock Provider
 - [x] Create LLM concept and plugin design docs.
 - [x] Create LLM execution flow documentation.
-- [ ] Define `knowledge/commands/` metadata examples.
-- [ ] Add `llm_plugin` mock provider implementation.
-- [ ] Add keyword/tag command retrieval.
-- [ ] Emit work-trace checkpoints.
-- [ ] Add tests for metadata parsing, retrieval, mock output, and trace shape.
+- [x] Define `plugins/shared_assets/knowledge/cmd/` metadata examples.
+- [x] Add `llm_plugin` mock provider implementation.
+- [x] Add keyword/tag command retrieval.
+- [x] Emit work-trace checkpoints.
+- [x] Add tests for metadata parsing, retrieval, mock output, and trace shape.
+- [x] Verify mock plugin executes end-to-end with zero paid provider dependency.
 
 Done when:
-- [ ] LLM prototype runs with zero paid provider dependency.
-- [ ] Same plugin contract can later support `ollama_local`.
-- [ ] Work trace shows retrieval and answer-generation stages without exposing hidden reasoning.
+- [x] LLM prototype runs with zero paid provider dependency.
+- [x] Same plugin contract can later support `ollama_local`.
+- [x] Work trace shows retrieval and answer-generation stages without exposing hidden reasoning.
 
 ### Beta: Ollama Local Provider
 - [ ] Add `ollama_local` provider adapter.
-- [ ] Keep `mock` as default test provider.
+- [x] Keep `mock` as default test provider.
 - [ ] Add provider timeout and local model config.
 - [ ] Add local usage/latency metadata where available.
 

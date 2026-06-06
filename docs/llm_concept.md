@@ -8,7 +8,7 @@ Aurora remains the orchestrator. LLM behavior stays inside plugin subprocesses s
 
 ## Goals
 
-- Read command metadata from repository files.
+- Read shared command metadata from repository files.
 - Retrieve relevant commands from user intent.
 - Produce structured responses that explain matched commands, endpoint options, assumptions, and safe next steps.
 - Emit visible work-trace checkpoints so operators can see what the plugin is doing.
@@ -29,14 +29,15 @@ Aurora remains the orchestrator. LLM behavior stays inside plugin subprocesses s
 - Plugin: `llm_plugin`
 - Prototype provider: `mock`
 - Beta provider: `ollama_local`
-- Command metadata directory: `knowledge/commands/`
+- Shared command metadata directory: `plugins/shared_assets/knowledge/cmd/`
+- Plugin-local knowledge directory: `plugins/LLM/knowledge/cmd/`
 
 ## Capability Model
 
 ```mermaid
 flowchart LR
   UserIntent[User Intent] --> LLMPlugin[llm_plugin]
-  CommandDocs[knowledge/commands/*.cmd.md] --> Retriever[Command Metadata Retriever]
+  CommandDocs[plugins/shared_assets/knowledge/cmd/*.cmd.md] --> Retriever[Command Metadata Retriever]
   Retriever --> LLMPlugin
   LLMPlugin --> Provider[Provider Adapter]
   Provider --> Mock[Prototype: mock]
@@ -102,7 +103,7 @@ The intended progression is:
 
 Required execution gates:
 
-- command is present in `knowledge/commands/`
+- command is present in `plugins/shared_assets/knowledge/cmd/`
 - command metadata marks it as executable
 - command risk level is evaluated
 - user/session has required role

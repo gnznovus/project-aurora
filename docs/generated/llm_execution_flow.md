@@ -10,7 +10,7 @@ sequenceDiagram
   participant Core as Aurora Core
   participant Agent as Aurora Agent
   participant Plugin as llm_plugin subprocess
-  participant Docs as knowledge/commands
+  participant Docs as plugins/shared_assets/knowledge/cmd
   participant Provider as mock provider
 
   User->>Core: POST /jobs with llm_plugin payload
