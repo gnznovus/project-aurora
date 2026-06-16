@@ -7,10 +7,12 @@ from pathlib import Path
 
 from aurora_agent.executor import execute_plugin
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def test_llm_plugin_mock_response_and_checkpoint():
-    plugin_path = Path("d:/Code/Python/Project_Aurora/plugins/llm_plugin.py")
-    root = Path("d:/Code/Python/Project_Aurora/.testdata") / uuid.uuid4().hex
+    plugin_path = REPO_ROOT / "plugins" / "llm_plugin.py"
+    root = REPO_ROOT / ".testdata" / uuid.uuid4().hex
     root.mkdir(parents=True, exist_ok=True)
     try:
         checkpoint_path = root / "llm_checkpoint.json"

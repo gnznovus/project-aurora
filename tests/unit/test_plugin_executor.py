@@ -4,14 +4,16 @@ from pathlib import Path
 
 from aurora_agent.executor import execute_plugin
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def test_plugin_executor_success():
-    plugin = Path("d:/Code/Python/Project_Aurora/plugins/echo_plugin.py")
+    plugin = REPO_ROOT / "plugins" / "echo_plugin.py"
     result = execute_plugin(
         plugin,
         timeout_seconds=2,
         job_payload={"message": "ok"},
-        checkpoint_path=Path("d:/Code/Python/Project_Aurora/.agent-cache/checkpoints/test-success.json"),
+        checkpoint_path=REPO_ROOT / ".agent-cache" / "checkpoints" / "test-success.json",
         resume_checkpoint=None,
     )
     assert result["status"] == "completed"
@@ -20,12 +22,12 @@ def test_plugin_executor_success():
 
 
 def test_plugin_executor_failure():
-    plugin = Path("d:/Code/Python/Project_Aurora/plugins/echo_plugin.py")
+    plugin = REPO_ROOT / "plugins" / "echo_plugin.py"
     result = execute_plugin(
         plugin,
         timeout_seconds=2,
         job_payload={"action": "fail", "code": 3},
-        checkpoint_path=Path("d:/Code/Python/Project_Aurora/.agent-cache/checkpoints/test-failure.json"),
+        checkpoint_path=REPO_ROOT / ".agent-cache" / "checkpoints" / "test-failure.json",
         resume_checkpoint=None,
     )
     assert result["status"] == "failed"
@@ -34,12 +36,12 @@ def test_plugin_executor_failure():
 
 
 def test_plugin_executor_timeout():
-    plugin = Path("d:/Code/Python/Project_Aurora/plugins/echo_plugin.py")
+    plugin = REPO_ROOT / "plugins" / "echo_plugin.py"
     result = execute_plugin(
         plugin,
         timeout_seconds=1,
         job_payload={"action": "sleep", "seconds": 2},
-        checkpoint_path=Path("d:/Code/Python/Project_Aurora/.agent-cache/checkpoints/test-timeout.json"),
+        checkpoint_path=REPO_ROOT / ".agent-cache" / "checkpoints" / "test-timeout.json",
         resume_checkpoint=None,
     )
     assert result["status"] == "timeout"

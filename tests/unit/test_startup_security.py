@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from aurora_core.config import Settings
 from aurora_core.main import create_app
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TESTDATA_DIR = REPO_ROOT / ".testdata"
+
+
+def _sqlite_url(name: str) -> str:
+    TESTDATA_DIR.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{(TESTDATA_DIR / name).as_posix()}"
 
 
 def test_create_app_allows_default_superadmin_in_dev():
     settings = Settings(
-        database_url="sqlite:///d:/Code/Python/Project_Aurora/.testdata/startup_dev.db",
+        database_url=_sqlite_url("startup_dev.db"),
         redis_url="redis://localhost:6379/15",
         use_inmemory_queue=True,
         backup_scheduler_enabled=False,
@@ -20,7 +30,7 @@ def test_create_app_allows_default_superadmin_in_dev():
 
 def test_create_app_rejects_default_superadmin_in_production():
     settings = Settings(
-        database_url="sqlite:///d:/Code/Python/Project_Aurora/.testdata/startup_prod.db",
+        database_url=_sqlite_url("startup_prod.db"),
         redis_url="redis://localhost:6379/15",
         use_inmemory_queue=True,
         backup_scheduler_enabled=False,
@@ -37,7 +47,7 @@ def test_create_app_rejects_default_superadmin_in_production():
 
 def test_create_app_rejects_default_tokens_in_production():
     settings = Settings(
-        database_url="sqlite:///d:/Code/Python/Project_Aurora/.testdata/startup_prod_default_tokens.db",
+        database_url=_sqlite_url("startup_prod_default_tokens.db"),
         redis_url="redis://localhost:6379/15",
         use_inmemory_queue=True,
         backup_scheduler_enabled=False,
@@ -58,7 +68,7 @@ def test_create_app_rejects_default_tokens_in_production():
 
 def test_create_app_rejects_weak_secrets_in_production():
     settings = Settings(
-        database_url="sqlite:///d:/Code/Python/Project_Aurora/.testdata/startup_prod_weak_secrets.db",
+        database_url=_sqlite_url("startup_prod_weak_secrets.db"),
         redis_url="redis://localhost:6379/15",
         use_inmemory_queue=True,
         backup_scheduler_enabled=False,
