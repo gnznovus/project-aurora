@@ -10,10 +10,12 @@ from fastapi.testclient import TestClient
 from aurora_core.config import Settings
 from aurora_core.main import create_app
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 @pytest.fixture()
 def test_settings() -> Settings:
-    root = Path("d:/Code/Python/Project_Aurora/.testdata") / uuid.uuid4().hex
+    root = REPO_ROOT / ".testdata" / uuid.uuid4().hex
     plugins_dir = root / "plugins"
     backup_dir = root / "backups"
     offsite_dir = root / "offsite_backups"
@@ -21,7 +23,7 @@ def test_settings() -> Settings:
     backup_dir.mkdir(parents=True, exist_ok=True)
     offsite_dir.mkdir(parents=True, exist_ok=True)
     db_path = root / "aurora.db"
-    sample_plugin = Path("d:/Code/Python/Project_Aurora/plugins/echo_plugin.py")
+    sample_plugin = REPO_ROOT / "plugins" / "echo_plugin.py"
     (plugins_dir / "echo_plugin.py").write_text(sample_plugin.read_text(encoding="utf-8"), encoding="utf-8")
     settings = Settings(
         database_url=f"sqlite:///{db_path.as_posix()}",
