@@ -25,6 +25,8 @@ dependencies = [
 dev = [
   "pytest>=8.3.0,<9.0.0",
   "httpx>=0.27.0,<1.0.0",
+  "ruff>=0.6.0,<1.0.0",
+  "pre-commit>=3.7.0,<5.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -34,6 +36,14 @@ testpaths = ["tests"]
 markers = [
   "integration: integration tests requiring live infrastructure",
 ]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+# Plugin manipulates sys.path before importing aurora_core (runs as a standalone subprocess).
+"plugins/llm_plugin.py" = ["E402"]
 
 [tool.setuptools.packages.find]
 include = ["aurora_core*", "aurora_agent*"]
