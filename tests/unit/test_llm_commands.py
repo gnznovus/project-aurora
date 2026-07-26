@@ -13,7 +13,9 @@ def test_load_command_metadata_reads_command_files():
     records = load_command_metadata(root)
     names = {record.name for record in records}
     assert "backup.restore" in names
+    assert "dashboard.overview" in names
     assert "health.ready" in names
+    assert "health.live" in names
     assert "jobs.enqueue" in names
 
 

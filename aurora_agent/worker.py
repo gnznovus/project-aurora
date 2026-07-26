@@ -9,6 +9,7 @@ from pathlib import Path
 from aurora_agent.client import AgentCredentials, AuroraClient
 from aurora_agent.config import AgentSettings
 from aurora_agent.executor import execute_plugin
+from aurora_agent.runtime_commands import ALLOWED_RUNTIME_COMMANDS, execute_allowlisted_runtime_command, parse_plugin_output
 from aurora_agent.plugin_cache import PluginCache
 
 logger = logging.getLogger("aurora-agent")
@@ -104,6 +105,146 @@ class AgentWorker:
             checkpoint_path=checkpoint_path,
             resume_checkpoint=resume_checkpoint,
         )
+        plugin_output = parse_plugin_output(result.get("stdout", ""))
+        runtime_plan = plugin_output.get("execution_plan") if isinstance(plugin_output, dict) else None
+        runtime_request_id = f"runtime:{lease['execution_id']}"
+        if isinstance(runtime_plan, dict):
+            self._emit_runtime_audit(
+                event_type="plan_validated",
+                request_id=runtime_request_id,
+                execution_id=lease["execution_id"],
+                job_id=lease["job_id"],
+                plugin_name=lease["plugin_name"],
+                execution_policy=str(plugin_output.get("execution_policy") or ""),
+                command_name=str(runtime_plan.get("command_name") or ""),
+                command_endpoint=str(runtime_plan.get("command_endpoint") or ""),
+                risk_level=str(runtime_plan.get("risk_level") or ""),
+                status=str(runtime_plan.get("status") or ""),
+                reason="; ".join(str(item) for item in runtime_plan.get("blockers", []) if item),
+                details={
+                    "approved": bool(runtime_plan.get("approved")),
+                    "blocker_count": len(runtime_plan.get("blockers") or []),
+                    "allowlisted": str(runtime_plan.get("command_name") or "") in ALLOWED_RUNTIME_COMMANDS,
+                },
+            )
+        command_name = ""
+        command_endpoint = ""
+        risk_level = ""
+        execution_policy = str(plugin_output.get("execution_policy") or "") if isinstance(plugin_output, dict) else ""
+        if isinstance(runtime_plan, dict):
+            command_name = str(runtime_plan.get("command_name") or "")
+            command_endpoint = str(runtime_plan.get("command_endpoint") or "")
+            risk_level = str(runtime_plan.get("risk_level") or "")
+        approved = bool(runtime_plan.get("approved")) if isinstance(runtime_plan, dict) else False
+        allowed_to_run = (
+            self.settings.enable_runtime_commands
+            and approved
+            and command_name in ALLOWED_RUNTIME_COMMANDS
+        )
+
+        if allowed_to_run:
+            self._emit_runtime_audit(
+                event_type="execution_started",
+                request_id=runtime_request_id,
+                execution_id=lease["execution_id"],
+                job_id=lease["job_id"],
+                plugin_name=lease["plugin_name"],
+                execution_policy=execution_policy,
+                command_name=command_name,
+                command_endpoint=command_endpoint,
+                risk_level=risk_level,
+                status="started",
+                reason="runtime command execution started",
+                details={
+                    "allowed": True,
+                    "enabled": True,
+                },
+            )
+            runtime_execution = execute_allowlisted_runtime_command(
+                self.client,
+                plugin_output,
+                enabled=self.settings.enable_runtime_commands,
+            )
+            result["metrics"]["runtime_command"] = runtime_execution
+            logger.info(
+                "agent.step runtime_command agent_id=%s execution_id=%s job_id=%s command=%s status=%s allowed=%s",
+                agent_id,
+                lease["execution_id"],
+                lease["job_id"],
+                runtime_execution.get("command_name"),
+                runtime_execution.get("status"),
+                runtime_execution.get("allowed"),
+            )
+            result["metrics"]["runtime_command_executed"] = True
+            self._emit_runtime_audit(
+                event_type="execution_completed",
+                request_id=runtime_request_id,
+                execution_id=lease["execution_id"],
+                job_id=lease["job_id"],
+                plugin_name=lease["plugin_name"],
+                execution_policy=execution_policy,
+                command_name=command_name,
+                command_endpoint=command_endpoint,
+                risk_level=risk_level,
+                status=str(runtime_execution.get("response_status") or "completed"),
+                reason="runtime command executed successfully",
+                details={
+                    "allowed": True,
+                    "response_status": runtime_execution.get("response_status"),
+                },
+            )
+        else:
+            runtime_execution = execute_allowlisted_runtime_command(
+                self.client,
+                plugin_output,
+                enabled=self.settings.enable_runtime_commands,
+            )
+            result["metrics"]["runtime_command_executed"] = False
+            if runtime_execution and runtime_execution.get("status") == "blocked":
+                result["status"] = "failed"
+                result["exit_code"] = 2
+                result["stderr"] = (
+                    (result.get("stderr") or "").rstrip()
+                    + (
+                        "\n" if result.get("stderr") else ""
+                    )
+                    + f"runtime command blocked: {runtime_execution.get('reason', 'blocked')}"
+                )
+                self._emit_runtime_audit(
+                    event_type="execution_rejected",
+                    request_id=runtime_request_id,
+                    execution_id=lease["execution_id"],
+                    job_id=lease["job_id"],
+                    plugin_name=lease["plugin_name"],
+                    execution_policy=execution_policy,
+                    command_name=command_name,
+                    command_endpoint=command_endpoint,
+                    risk_level=risk_level,
+                    status="blocked",
+                    reason=str(runtime_execution.get("reason") or "blocked"),
+                    details={
+                        "allowed": False,
+                    },
+                )
+            elif approved:
+                rejection_reason = "runtime execution disabled" if not self.settings.enable_runtime_commands else "command not allowlisted"
+                self._emit_runtime_audit(
+                    event_type="execution_rejected",
+                    request_id=runtime_request_id,
+                    execution_id=lease["execution_id"],
+                    job_id=lease["job_id"],
+                    plugin_name=lease["plugin_name"],
+                    execution_policy=execution_policy,
+                    command_name=command_name,
+                    command_endpoint=command_endpoint,
+                    risk_level=risk_level,
+                    status="blocked",
+                    reason=rejection_reason,
+                    details={
+                        "allowed": False,
+                        "enabled": self.settings.enable_runtime_commands,
+                    },
+                )
         latest_checkpoint = self._read_checkpoint(checkpoint_path)
         if latest_checkpoint is not None:
             logger.info(
@@ -160,6 +301,50 @@ class AgentWorker:
             return max(0, min(100, cpu_pct)), max(0, min(100, ram_pct))
         except Exception:  # noqa: BLE001
             return None, None
+
+    def _emit_runtime_audit(
+        self,
+        *,
+        event_type: str,
+        request_id: str,
+        execution_id: str,
+        job_id: str,
+        plugin_name: str,
+        execution_policy: str,
+        command_name: str,
+        command_endpoint: str,
+        risk_level: str,
+        status: str,
+        reason: str,
+        details: dict[str, object],
+    ) -> None:
+        try:
+            self.client.runtime_audit(
+                {
+                    "schema_version": "v1",
+                    "event_type": event_type,
+                    "execution_id": execution_id,
+                    "job_id": job_id,
+                    "plugin_name": plugin_name,
+                    "command_name": command_name,
+                    "command_endpoint": command_endpoint,
+                    "execution_policy": execution_policy,
+                    "risk_level": risk_level,
+                    "status": status,
+                    "reason": reason,
+                    "details": details,
+                },
+                request_id=request_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "agent.step runtime_audit_failed execution_id=%s job_id=%s command=%s event_type=%s error=%s",
+                execution_id,
+                job_id,
+                command_name,
+                event_type,
+                exc,
+            )
 
 
 if __name__ == "__main__":

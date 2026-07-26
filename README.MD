@@ -2,12 +2,23 @@
 
 Aurora is a distributed job orchestration platform that executes versioned plugins across pull-based worker agents. It is built for reliable execution, observability, and controlled operations from a centralized dashboard.
 
+**Highlights**
+
+- Distributed worker orchestration
+- Checkpoint & resume
+- Fault-tolerant execution
+- Plugin runtime
+- Operational dashboard
+- Backup & recovery
+- LLM plugin prototype with allowlisted read-only runtime actions
+
 ## Why This Project Matters
 
 - Reliability first: lease-based dispatch, retries, backoff, and stale-lease recovery.
 - Long-running job support: checkpoint/resume so work does not restart from zero.
 - Safe execution model: plugins run as subprocesses with timeout, exit-code, and output capture.
 - Operational visibility: live dashboard, progression feed, and audit logs for important actions.
+- LLM path: command metadata retrieval, structured responses, and audit-backed read-only runtime execution.
 - Extensible foundation: deterministic routing today, strategy interface for future policy engines.
 
 ## Architecture
@@ -103,6 +114,10 @@ sequenceDiagram
   - `GET /dashboard/api/overview`
   - `GET /health`
   - `GET /health/ready`
+- Runtime read-only summary endpoints used by the LLM worker
+  - `GET /agents/runtime/overview`
+- Runtime audit endpoint used by the LLM worker
+  - `POST /agents/runtime/audit`
 - Superadmin operations
   - `POST /superadmin/users`
   - `GET /superadmin/audit/logs`
@@ -421,6 +436,8 @@ alembic history --verbose
   - queue adapter
   - schema guard mode
   - backup scheduler state
+- `GET /agents/runtime/overview` returns a bounded read-only runtime summary for the authenticated agent.
+- `POST /agents/runtime/audit` records runtime plan/start/completion/rejection events in the audit log.
 - `503` is returned when one or more readiness components are degraded.
 
 ## Engineering Tradeoffs
@@ -431,6 +448,8 @@ alembic history --verbose
   - Predictable behavior first, pluggable strategy interface for future policies.
 - Subprocess plugin runtime
   - Better fault isolation than in-process execution at MVP complexity level.
+- Allowlisted read-only LLM runtime actions
+  - Keeps runtime execution explicit, bounded, and auditable while destructive execution remains gated.
 - Single-core deployment initially
   - Faster delivery and validation; HA planned for later phase.
 
@@ -440,8 +459,11 @@ alembic history --verbose
 - Click-through dashboard drilldowns per card/panel.
 - Superadmin tools expansion (policy controls, operational guardrails).
 - High-availability core deployment model.
-- Optional LLM plugin class when budget/ops constraints allow.
+- LLM plugin beta: structured command guidance plus allowlisted read-only runtime actions.
+- Destructive runtime execution remains future work behind metadata, role, confirmation, and audit gates.
 
 ## Project Status
 
 Aurora is in MVP-plus phase: end-to-end orchestration is live, dashboard operations are functional, and the system is being hardened for production-oriented workflows.
+
+The LLM plugin track is in beta with mock and Ollama-local providers, command metadata retrieval, structured output, read-only runtime execution for health/dashboard summaries, and runtime audit logging. Destructive command execution remains intentionally disabled until the audit and approval gates are expanded.

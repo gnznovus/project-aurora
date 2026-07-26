@@ -6,7 +6,7 @@ auth: none
 tags:
   - health
   - readiness
-executable: false
+executable: true
 execution_kind: aurora_api
 ---
 

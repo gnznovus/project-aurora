@@ -143,24 +143,31 @@ Done when:
 - [x] Work trace shows retrieval and answer-generation stages without exposing hidden reasoning.
 
 ### Beta: Ollama Local Provider
-- [ ] Add `ollama_local` provider adapter.
+- [x] Add provider adapter interface for `mock` and `ollama_local`.
+- [x] Add Ollama-specific config fields.
+- [x] Add `ollama_local` provider adapter.
 - [x] Keep `mock` as default test provider.
-- [ ] Add provider timeout and local model config.
-- [ ] Add local usage/latency metadata where available.
+- [x] Add provider timeout and local model config.
+- [x] Add local usage/latency metadata where available.
 
-### Future: Runtime Command Execution
-- [ ] Add command metadata fields for executable commands (`executable`, `execution_kind`, `risk_level`, `requires_confirmation`, `required_role`).
-- [ ] Add `execution_policy` support: `suggest_only`, `plan_only`, `allowlisted_execute`.
-- [ ] Add plan-only validation for selected command, payload, role, and risk.
-- [ ] Add allowlisted execution path only after plan validation is tested.
-- [ ] Require confirmation token for destructive command execution.
-- [ ] Add audit logs for command plan, execution start, execution result, and rejection.
-- [ ] Add tests proving free-form generated commands cannot execute.
+### Beta: Read-Only Runtime Execution
+- [x] Add command metadata fields for executable commands (`executable`, `execution_kind`, `risk_level`, `requires_confirmation`, `required_role`).
+- [x] Add `execution_policy` support: `suggest_only`, `plan_only`, `allowlisted_execute`.
+- [x] Add plan-only validation for selected command, payload, role, and risk.
+- [x] Add allowlisted execution path only after plan validation is tested.
+- [x] Require confirmation token for destructive command execution.
+- [x] Add audit logs for command plan, execution start, execution result, and rejection.
+- [x] Add tests proving free-form generated commands cannot execute.
+- [x] Add worker-level integration coverage for allowlisted runtime health checks.
 
 Done when:
-- [ ] Prototype remains suggest-only.
-- [ ] Future execution is metadata-driven, allowlisted, role-checked, and audited.
-- [ ] Destructive execution cannot run without confirmation token.
+- [x] Read-only runtime execution is feature-flagged, bounded, allowlisted, and audited.
+- [ ] Destructive execution remains metadata-driven, role-checked, and fully audited.
+
+### Future: Destructive Runtime Execution
+- [ ] Expand runtime allowlist beyond read-only health and dashboard summary checks.
+- [ ] Add full audit-event emission for destructive command planning and execution.
+- [ ] Add destructive command execution only after end-to-end audit coverage is in place.
 
 ## Nice to Have (Open)
 
@@ -173,7 +180,7 @@ Done when:
 - [ ] Add weighted/load-aware strategy option.
 
 ### 3. Plugin Runtime Improvements
-- [ ] Add richer plugin execution metadata and failure categorization.
+- [x] Add richer plugin execution metadata and failure categorization.
 - [ ] Add retry policy profiles per plugin/job type.
 
 ### 4. Operational Guardrails

@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from aurora_core.config import Settings
@@ -39,14 +40,17 @@ from aurora_core.services.schemas import (
     JobProgressResponse,
     NextJobResponse,
     PluginManifest,
+    RuntimeAuditRequest,
+    RuntimeAuditResponse,
     RegisterAgentRequest,
     RegisterAgentResponse,
     RegisterPluginRequest,
     RegisterPluginResponse,
+    RuntimeOverviewResponse,
 )
 from aurora_core.services.security import get_db, new_agent_id, new_api_key, require_admin_token, require_agent_auth
 from aurora_core.utils.timeutils import utc_now_naive
-from aurora_core.services.web_auth import audit_important_action, get_request_id
+from aurora_core.services.web_auth import audit_important_action, get_request_id, request_ip, with_request_context, write_audit_log
 
 logger = logging.getLogger("aurora-core")
 router = APIRouter()
@@ -688,6 +692,104 @@ def job_progress(job_id: str, db: Session = Depends(get_db), _: Annotated[None, 
         max_attempts=job.max_attempts,
         checkpoint=checkpoint,
     )
+
+
+@router.get("/agents/runtime/overview", response_model=RuntimeOverviewResponse)
+def runtime_overview(
+    db: Annotated[Session, Depends(get_db)],
+    agent: Annotated[Agent, Depends(require_agent_auth)],
+) -> RuntimeOverviewResponse:
+    now = utc_now_naive()
+    total_jobs = db.scalar(select(func.count(Job.id))) or 0
+    queued_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.queued)) or 0
+    leased_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.leased)) or 0
+    completed_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.completed)) or 0
+    failed_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.failed)) or 0
+    leased_executions = db.scalar(select(func.count(Execution.id)).where(Execution.status == ExecutionStatus.leased)) or 0
+    completed_executions = db.scalar(select(func.count(Execution.id)).where(Execution.status == ExecutionStatus.completed)) or 0
+    failed_executions = db.scalar(select(func.count(Execution.id)).where(Execution.status == ExecutionStatus.failed)) or 0
+    timeout_executions = db.scalar(select(func.count(Execution.id)).where(Execution.status == ExecutionStatus.timeout)) or 0
+    recent_jobs = list(
+        db.scalars(select(Job).order_by(Job.created_at.desc()).limit(3))
+    )
+    job_rows = []
+    for job in recent_jobs:
+        plugin = db.scalar(select(Plugin).where(Plugin.id == job.plugin_id))
+        job_rows.append(
+            {
+                "job_id": job.id,
+                "status": job.status.value,
+                "plugin_name": plugin.name if plugin else "unknown",
+                "attempt_count": job.attempt_count,
+                "max_attempts": job.max_attempts,
+                "age_seconds": max(0, int((now - job.created_at).total_seconds())),
+            }
+        )
+    return RuntimeOverviewResponse(
+        service="aurora-core",
+        scope="agent_runtime_overview",
+        agent_id=agent.id,
+        agent_name=agent.name,
+        status=agent.status,
+        active_leases=agent.active_leases,
+        max_concurrency=agent.max_concurrency,
+        metrics={
+            "total_jobs": total_jobs,
+            "queued_jobs": queued_jobs,
+            "leased_jobs": leased_jobs,
+            "completed_jobs": completed_jobs,
+            "failed_jobs": failed_jobs,
+            "leased_executions": leased_executions,
+            "completed_executions": completed_executions,
+            "failed_executions": failed_executions,
+            "timeout_executions": timeout_executions,
+        },
+        recent_jobs=job_rows,
+    )
+
+
+@router.post("/agents/runtime/audit", response_model=RuntimeAuditResponse)
+def runtime_audit(
+    request: Request,
+    payload: RuntimeAuditRequest,
+    agent: Annotated[Agent, Depends(require_agent_auth)],
+) -> RuntimeAuditResponse:
+    details = with_request_context(
+        request,
+        {
+            **payload.details,
+            "event_type": payload.event_type,
+            "execution_id": payload.execution_id,
+            "job_id": payload.job_id,
+            "plugin_name": payload.plugin_name,
+            "command_name": payload.command_name,
+            "command_endpoint": payload.command_endpoint,
+            "execution_policy": payload.execution_policy,
+            "risk_level": payload.risk_level,
+            "status": payload.status,
+            "reason": payload.reason,
+        },
+    )
+    write_audit_log(
+        request.app.state.session_factory(),
+        actor_username=agent.name,
+        actor_role="agent",
+        action=f"runtime.{payload.event_type}",
+        resource_type="runtime_command",
+        resource_id=payload.execution_id or payload.job_id or payload.command_name,
+        details=details,
+        ip_address=request_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    logger.info(
+        "runtime.audit.recorded request_id=%s agent_id=%s event_type=%s command=%s status=%s",
+        get_request_id(request),
+        agent.id,
+        payload.event_type,
+        payload.command_name,
+        payload.status,
+    )
+    return RuntimeAuditResponse(status="ok", event_type=payload.event_type)
 
 
 def _latest_checkpoint_for_job(db: Session, job_id: str) -> dict | None:

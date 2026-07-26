@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     idempotency_ttl_seconds: int = 3600
     destructive_action_token_ttl_seconds: int = 300
 
+    llm_provider_default: str = "mock"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "llama3.2:3b"
+    ollama_timeout_seconds: int = 60
+    ollama_keep_alive: str = "5m"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

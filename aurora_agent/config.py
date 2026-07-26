@@ -14,6 +14,7 @@ class AgentSettings(BaseSettings):
     poll_seconds: int = 3
     cache_dir: Path = Path(".agent-cache/plugins")
     checkpoint_dir: Path = Path(".agent-cache/checkpoints")
+    enable_runtime_commands: bool = False
 
     agent_id: str | None = None
     agent_api_key: str | None = None

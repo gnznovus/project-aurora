@@ -2,7 +2,7 @@
 
 ## Summary
 
-This graph describes the planned Aurora LLM plugin prototype. The first version uses a mock provider and command metadata retrieval only. Ollama local provider support is reserved for beta.
+This graph describes the Aurora LLM plugin flow. The core prototype uses a mock provider and command metadata retrieval. Ollama local provider support is available in beta, and a read-only allowlisted runtime path exists for health checks.
 
 ```mermaid
 sequenceDiagram
@@ -44,12 +44,35 @@ sequenceDiagram
 
 ## Risk Controls
 
-- No destructive command execution in prototype.
-- No runtime command execution in prototype.
+- No destructive command execution through the LLM runtime path.
+- Read-only runtime commands are limited to an explicit allowlist.
+- Runtime execution is disabled by default and must be feature-flagged.
 - No external provider dependency in prototype.
 - No vector database in prototype.
 - Provider adapters stay plugin-local.
 - Raw prompt and secrets are not stored by default.
+
+## Runtime Beta Flow
+
+```mermaid
+flowchart TD
+  PluginOut[llm_plugin output] --> Worker[Agent Worker]
+  Worker --> PlanCheck{Approved plan?}
+  PlanCheck -->|No| Reject[Skip runtime command]
+  PlanCheck -->|Yes| Allowlist{Command in allowlist?}
+  Allowlist -->|No| Reject
+  Allowlist -->|Yes| HealthCall[Call read-only core health endpoint]
+  HealthCall --> CoreHealth[Aurora Core /health or /health/ready]
+  Worker --> Audit[POST /agents/runtime/audit]
+  Audit --> CoreAudit[Core audit_logs table]
+  CoreHealth --> RuntimeResult[Runtime result in job metrics]
+```
+
+Current allowlist:
+
+- `health.ready`
+- `health.live`
+- `dashboard.overview`
 
 ## Future Command Execution Flow
 
@@ -67,7 +90,7 @@ flowchart TD
   Validate -->|Invalid| Reject[Reject With Explanation]
 ```
 
-Execution must be metadata-driven and audited. Free-form generated shell text must not be executed.
+Execution must remain metadata-driven and audited. Free-form generated shell text must not be executed.
 
 ## Beta Extension
 

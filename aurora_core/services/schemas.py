@@ -136,3 +136,37 @@ class JobProgressResponse(BaseModel):
     max_attempts: int
     latest_execution_id: str | None = None
     checkpoint_payload: dict[str, Any] | None = None
+
+
+class RuntimeOverviewResponse(BaseModel):
+    schema_version: str = SCHEMA_VERSION
+    service: str
+    scope: str
+    agent_id: str
+    agent_name: str
+    status: str
+    active_leases: int
+    max_concurrency: int
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    recent_jobs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RuntimeAuditRequest(BaseModel):
+    schema_version: str = SCHEMA_VERSION
+    event_type: str
+    execution_id: str | None = None
+    job_id: str | None = None
+    plugin_name: str | None = None
+    command_name: str | None = None
+    command_endpoint: str | None = None
+    execution_policy: str | None = None
+    risk_level: str | None = None
+    status: str | None = None
+    reason: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeAuditResponse(BaseModel):
+    schema_version: str = SCHEMA_VERSION
+    status: str
+    event_type: str

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import time
 
+from sqlalchemy import func, select
+
+from aurora_core.services.models import AuditLog
+
 
 def _register_agent(client):
     response = client.post(
@@ -165,6 +169,62 @@ def test_dashboard_overview_payload(client):
     assert "agents" in data
     assert "jobs" in data
     assert "executions" in data
+
+
+def test_runtime_overview_payload(client):
+    agent = _register_agent(client)
+    response = client.get("/agents/runtime/overview", headers=_auth_headers(agent))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["schema_version"] == "v1"
+    assert data["service"] == "aurora-core"
+    assert data["scope"] == "agent_runtime_overview"
+    assert data["agent_id"] == agent["agent_id"]
+    assert "metrics" in data
+    assert "recent_jobs" in data
+
+
+def test_runtime_audit_persists_audit_log(client):
+    agent = _register_agent(client)
+    before_session = client.app.state.session_factory()
+    try:
+        before_count = before_session.scalar(select(func.count(AuditLog.id))) or 0
+    finally:
+        before_session.close()
+    response = client.post(
+        "/agents/runtime/audit",
+        headers={**_auth_headers(agent), "X-Request-Id": "req-runtime-audit-1"},
+        json={
+            "schema_version": "v1",
+            "event_type": "plan_validated",
+            "execution_id": "exe_test_1",
+            "job_id": "JOB_test_1",
+            "plugin_name": "llm",
+            "command_name": "health.ready",
+            "command_endpoint": "/health/ready",
+            "execution_policy": "allowlisted_execute",
+            "risk_level": "normal",
+            "status": "validated",
+            "reason": "plan accepted",
+            "details": {"approved": True},
+        },
+    )
+    assert response.status_code == 200
+    after_session = client.app.state.session_factory()
+    try:
+        rows = list(
+            after_session.scalars(
+                select(AuditLog).where(AuditLog.action == "runtime.plan_validated").order_by(AuditLog.id.desc())
+            )
+        )
+    finally:
+        after_session.close()
+    assert len(rows) >= before_count + 1
+    row = rows[-1]
+    assert row.actor_role == "agent"
+    assert row.resource_id == "exe_test_1"
+    assert row.details["request_id"] == "req-runtime-audit-1"
+    assert row.details["command_name"] == "health.ready"
 
 
 def test_request_id_echo_when_header_provided(client):

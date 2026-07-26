@@ -21,6 +21,7 @@ class CommandMetadata:
     requires_confirmation: bool = False
     executable: bool = False
     execution_kind: str = "aurora_api"
+    required_role: str = ""
     payload_schema: dict[str, Any] | None = None
     examples: list[dict[str, Any]] = field(default_factory=list)
     source_path: str = ""
@@ -78,6 +79,7 @@ def retrieve_commands(query: str, commands_dir: Path | str, max_results: int = 5
                 "requires_confirmation": record.requires_confirmation,
                 "executable": record.executable,
                 "execution_kind": record.execution_kind,
+                "required_role": record.required_role,
                 "confidence": round(min(0.99, score / 10.0), 2),
                 "source_path": record.source_path,
             }
@@ -100,6 +102,7 @@ def _parse_command_file(path: Path) -> CommandMetadata | None:
     requires_confirmation = _as_bool(frontmatter.get("requires_confirmation"))
     executable = _as_bool(frontmatter.get("executable"))
     execution_kind = str(frontmatter.get("execution_kind", "aurora_api")).strip() or "aurora_api"
+    required_role = str(frontmatter.get("required_role", "")).strip()
     payload_schema = frontmatter.get("payload_schema") if isinstance(frontmatter.get("payload_schema"), dict) else None
     examples_raw = _ensure_list(frontmatter.get("examples"))
     examples: list[dict[str, Any]] = []
@@ -122,6 +125,7 @@ def _parse_command_file(path: Path) -> CommandMetadata | None:
         requires_confirmation=requires_confirmation,
         executable=executable,
         execution_kind=execution_kind,
+        required_role=required_role,
         payload_schema=payload_schema,
         examples=examples,
         source_path=path.name,

@@ -4,6 +4,8 @@
 
 The `llm_plugin` is a subprocess plugin that accepts a user request, retrieves relevant command metadata, generates a structured response through a provider adapter, and writes work-trace checkpoints during execution.
 
+The current beta path also supports a guarded read-only runtime allowlist through the agent worker for health checks.
+
 The prototype provider is `mock`; Ollama local support is deferred to beta.
 
 ## Plugin Input Contract
@@ -174,13 +176,19 @@ Each checkpoint should include:
 
 ## Runtime Command Execution Plan
 
-Runtime command execution is a planned future capability. It must be implemented as an explicit allowlisted path, not as arbitrary shell execution.
+Runtime command execution is now partially enabled for read-only health checks through an explicit allowlisted path. Destructive execution remains a planned future capability and must not be exposed as arbitrary shell execution.
 
 Execution policy phases:
 
 - `suggest_only`: return relevant commands and explanation; no execution.
 - `plan_only`: build validated command plan; no execution.
 - `allowlisted_execute`: execute only commands marked executable in metadata.
+
+Current runtime allowlist:
+
+- `health.ready`
+- `health.live`
+- `dashboard.overview`
 
 Required metadata for executable commands:
 
@@ -197,11 +205,12 @@ Execution requirements:
 - The selected command must come from parsed metadata, not generated text.
 - Payload must validate against metadata schema.
 - Destructive commands must require a confirmation token.
+- Runtime plan/start/completion/rejection events must be emitted to Core audit logs for allowlisted execution.
 - Execution must emit checkpoints for `plan_validated`, `permission_checked`, `execution_started`, and `execution_completed`.
 - Audit logs must include actor, request_id, command name, endpoint, risk level, and result status.
 - Output must be size bounded and redacted before storing in result payload.
 
-Prototype implementation should leave this as documented design only.
+Prototype implementation should leave destructive execution as documented design only. The read-only runtime allowlist is enabled behind a feature flag and must remain bounded.
 
 ## Test Strategy
 

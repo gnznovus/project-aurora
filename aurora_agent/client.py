@@ -91,6 +91,39 @@ class AuroraClient:
         response.raise_for_status()
         return response.content
 
+    def health_ready(self) -> dict[str, Any]:
+        response = requests.get(f"{self.base_url}/health/ready", timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def health_live(self) -> dict[str, Any]:
+        response = requests.get(f"{self.base_url}/health", timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def runtime_overview(self) -> dict[str, Any]:
+        response = requests.get(f"{self.base_url}/agents/runtime/overview", headers=self._auth_headers(), timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def runtime_audit(
+        self,
+        payload: dict[str, Any],
+        *,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        headers = self._auth_headers()
+        if request_id:
+            headers["X-Request-Id"] = request_id
+        response = requests.post(
+            f"{self.base_url}/agents/runtime/audit",
+            headers=headers,
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def report_result(self, execution_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = requests.post(
             f"{self.base_url}/executions/{execution_id}/result",

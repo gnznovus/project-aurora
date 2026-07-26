@@ -20,7 +20,7 @@ Aurora remains the orchestrator. LLM behavior stays inside plugin subprocesses s
 - No external vector database for prototype.
 - No direct agent access to Aurora Core database internals.
 - No hidden chain-of-thought exposure.
-- No runtime command execution in prototype.
+- No unrestricted runtime command execution in prototype; read-only allowlisted health checks are enabled behind a feature flag in beta.
 - No automatic destructive action execution in any phase.
 
 ## Naming
@@ -113,3 +113,9 @@ Required execution gates:
 - command output is bounded and redacted
 
 Runtime execution must remain outside Aurora Core's generic orchestration logic unless a clear, tested command-execution service boundary is added. The LLM should never execute commands directly from free-form generated text.
+
+Current read-only runtime allowlist:
+
+- `health.ready`
+- `health.live`
+- `dashboard.overview`
